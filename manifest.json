@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "calmasacow.openrouter-usage-plus",
+  "name": "OpenRouter Usage Plus",
+  "version": "1.2.0",
+  "author": "calmasacow",
+  "license": "MIT",
+  "description": "OpenRouter credits on the Omarchy bar: remaining balance, spend by day, Details with top models/apps/keys, and shortcuts to credits, activity, keys, and models.",
+  "kinds": ["bar-widget"],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "OpenRouter Usage Plus",
+    "description": "Bar mark plus remaining credit. Panel: header balance, OpenRouter shortcuts, spend by day, and a sticky Details section for spend, requests, tokens, cache hit, top models, top apps, and top keys.",
+    "category": "AI",
+    "aliases": ["openrouter", "openrouter-usage", "openrouter-usage-plus"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 300,
+      "detailsExpanded": false
+    },
+    "schema": [
+      { "key": "refreshIntervalSec", "type": "integer", "label": "Refresh interval (seconds)", "min": 60, "max": 3600, "step": 60, "defaultValue": 300 },
+      { "key": "detailsExpanded", "type": "boolean", "label": "Keep Details expanded", "defaultValue": false }
+    ]
+  }
+}
