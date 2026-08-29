@@ -25,27 +25,31 @@ Derived from [ssobhani/omarchy-openrouter-usage](https://github.com/sepehr500/om
 omarchy plugin add https://github.com/calmasacow/omarchy-openrouter-usage-plus.git --enable
 ```
 
-Then provide your API key. Either export `OPENROUTER_API_KEY`, or (recommended, works for the widget refresh timer):
+Then copy the example config and put your real keys in it. The checked-in file is a template only — never commit live keys.
 
 ```bash
 mkdir -p ~/.config/omarchy/agents
-cat > ~/.config/omarchy/agents/openrouter.json <<EOF
-{"apiKey": "sk-or-v1-..."}
-EOF
+cp examples/config/omarchy/agents/openrouter.json ~/.config/omarchy/agents/openrouter.json
 chmod 600 ~/.config/omarchy/agents/openrouter.json
 ```
+
+Example (`examples/config/omarchy/agents/openrouter.json`):
+
+```json
+{
+  "apiKey": "sk-or-v1-REPLACE_WITH_YOUR_INFERENCE_KEY",
+  "managementKey": "sk-or-v1-REPLACE_WITH_YOUR_MANAGEMENT_KEY"
+}
+```
+
+- `apiKey` — inference key from [openrouter.ai/settings/keys](https://openrouter.ai/settings/keys) (balance, spend). You can also export `OPENROUTER_API_KEY`.
+- `managementKey` — read-only [management key](https://openrouter.ai/settings/management-keys) for Top Models / Apps / Keys. Analytics rejects inference keys (403). You can also export `OPENROUTER_MANAGEMENT_KEY`.
 
 The widget appears once the first scan finds a usable account or local usage.
 
 ## Optional: Details from the Activity API
 
-Top Apps and Top Keys come from OpenRouter Analytics. That API rejects inference keys (403). Create a read-only [management key](https://openrouter.ai/settings/management-keys) and add it:
-
-```json
-{"apiKey": "sk-or-v1-...", "managementKey": "sk-or-v1-..."}
-```
-
-Or export `OPENROUTER_MANAGEMENT_KEY`. Without it, Details still shows cards from local pi/omp sessions when those exist; ranked lists stay hidden.
+Without `managementKey`, Details still shows cards from local pi/omp sessions when those exist; ranked lists stay hidden.
 
 `d` toggles Details. Expand/collapse is remembered in bar settings.
 
