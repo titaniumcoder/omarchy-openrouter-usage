@@ -44,6 +44,8 @@ PERIOD_DAYS = {"7d": 7, "1mo": 30, "3mo": 90}
 MAX_PRIVATE_FILE_BYTES = 512 * 1024
 MAX_HTTP_BYTES = 256 * 1024
 MAX_TRANSCRIPT_FILES = 512
+MAX_TRANSCRIPT_DIRS = 256
+MAX_TRANSCRIPT_ENTRIES = 4096
 MAX_TRANSCRIPT_BYTES = 2 * 1024 * 1024
 MAX_SCAN_BYTES = 32 * 1024 * 1024
 MAX_LINE_BYTES = 256 * 1024
@@ -134,7 +136,7 @@ def _validate_transcript_dir(fd: int) -> None:
     raise OSError("unsafe transcript directory")
 
 
-def iter_transcript_files(root: Path, deadline: float):
+def iter_transcript_files(root: Path, deadline: float, budget: dict[str, int]):
   """Yield verified transcript leaf fds from a held, no-follow directory tree."""
   try:
     root_fd = open_owned_dir(root)
@@ -142,50 +144,47 @@ def iter_transcript_files(root: Path, deadline: float):
   except OSError:
     return
 
-  stack: list[tuple[int, str, int]] = [(root_fd, str(root), 0)]
-  try:
-    while stack:
-      if time.monotonic() >= deadline:
-        break
-      directory_fd, display_path, depth = stack.pop()
-      try:
-        if depth > 16:
+  def walk(directory_fd: int, display_path: str, depth: int):
+    if (depth > 16 or time.monotonic() >= deadline
+        or budget["directories"] >= MAX_TRANSCRIPT_DIRS):
+      return
+    budget["directories"] += 1
+    with os.scandir(directory_fd) as entries:
+      for entry in entries:
+        if (time.monotonic() >= deadline
+            or budget["entries"] >= MAX_TRANSCRIPT_ENTRIES):
+          break
+        budget["entries"] += 1
+        name = entry.name
+        if name in (".", ".."):
           continue
-        with os.scandir(directory_fd) as entries:
-          for entry in entries:
-            if time.monotonic() >= deadline:
-              break
-            name = entry.name
-            if name in (".", ".."):
-              continue
+        try:
+          info = entry.stat(follow_symlinks=False)
+          if stat.S_ISDIR(info.st_mode):
+            child_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=directory_fd)
             try:
-              info = entry.stat(follow_symlinks=False)
-              if stat.S_ISDIR(info.st_mode):
-                child_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=directory_fd)
-                try:
-                  child_info = os.fstat(child_fd)
-                  _validate_transcript_dir(child_fd)
-                  if (child_info.st_dev, child_info.st_ino) != (info.st_dev, info.st_ino):
-                    raise OSError("transcript directory changed during traversal")
-                except Exception:
-                  os.close(child_fd)
-                  continue
-                stack.append((child_fd, f"{display_path}/{name}", depth + 1))
-              elif name.endswith(".jsonl") and stat.S_ISREG(info.st_mode):
-                leaf_fd = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
-                leaf_info = os.fstat(leaf_fd)
-                if (not stat.S_ISREG(leaf_info.st_mode) or leaf_info.st_uid != os.getuid()
-                    or (leaf_info.st_dev, leaf_info.st_ino) != (info.st_dev, info.st_ino)):
-                  os.close(leaf_fd)
-                  continue
-                yield leaf_fd, leaf_info, f"{display_path}/{name}"
-            except OSError:
+              child_info = os.fstat(child_fd)
+              _validate_transcript_dir(child_fd)
+              if (child_info.st_dev, child_info.st_ino) != (info.st_dev, info.st_ino):
+                raise OSError("transcript directory changed during traversal")
+              yield from walk(child_fd, f"{display_path}/{name}", depth + 1)
+            finally:
+              os.close(child_fd)
+          elif name.endswith(".jsonl") and stat.S_ISREG(info.st_mode):
+            leaf_fd = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
+            leaf_info = os.fstat(leaf_fd)
+            if (not stat.S_ISREG(leaf_info.st_mode) or leaf_info.st_uid != os.getuid()
+                or (leaf_info.st_dev, leaf_info.st_ino) != (info.st_dev, info.st_ino)):
+              os.close(leaf_fd)
               continue
-      finally:
-        os.close(directory_fd)
+            yield leaf_fd, leaf_info, f"{display_path}/{name}"
+        except OSError:
+          continue
+
+  try:
+    yield from walk(root_fd, str(root), 0)
   finally:
-    for directory_fd, _display_path, _depth in stack:
-      os.close(directory_fd)
+    os.close(root_fd)
 
 
 def read_private_json(path: Path, limit: int = MAX_PRIVATE_FILE_BYTES) -> dict[str, Any] | None:
@@ -397,9 +396,10 @@ def scan_pi_usage(max_age_seconds: float) -> dict[str, Any]:
   scanned_bytes = 0
   oldest_allowed = time.time() - TRANSCRIPT_MAX_AGE_DAYS * 86400
   scan_deadline = scan_started + SCAN_DEADLINE_SECONDS
+  traversal_budget = {"directories": 0, "entries": 0}
 
   for root in roots:
-    files = iter_transcript_files(root, scan_deadline)
+    files = iter_transcript_files(root, scan_deadline, traversal_budget)
     for fd, info, session_path in files:
       if scanned_files >= MAX_TRANSCRIPT_FILES or scanned_bytes >= MAX_SCAN_BYTES or time.monotonic() - scan_started >= SCAN_DEADLINE_SECONDS:
         os.close(fd)
