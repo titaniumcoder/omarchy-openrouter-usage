@@ -87,7 +87,8 @@ Panel {
     var n = Number(value || 0)
     if (!(n >= 0)) n = 0
     if (n >= 1000) return "$" + (n / 1000).toFixed(1) + "k"
-    return "$" + (n >= 100 ? n.toFixed(0) : n.toFixed(2))
+    // Always two decimals so a column of amounts never mixes widths.
+    return "$" + n.toFixed(2)
   }
 
   function balanceDetailText(b) {
@@ -641,6 +642,13 @@ Panel {
             foreground: root.foreground
           }
 
+          Item {
+            // Breathing room between the account links and the first section.
+            visible: spendSection.visible
+            width: parent.width
+            height: Style.space(6)
+          }
+
           Column {
             id: spendSection
             visible: root.days.length > 0
@@ -650,8 +658,9 @@ Panel {
             readonly property real peak: root.weekPeak()
 
             PanelSectionHeader {
+              visible: root.keyedBars
               width: parent.width
-              text: "USAGE THIS WEEK"
+              text: "USAGE BY DAY · TOP KEYS"
               foreground: root.foreground
               fontFamily: root.fontFamily
             }
@@ -716,6 +725,13 @@ Panel {
                   }
                 }
               }
+            }
+
+            PanelSectionHeader {
+              width: parent.width
+              text: "USAGE BY DAY"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
             }
 
             Repeater {
@@ -882,6 +898,17 @@ Panel {
                   text: "KEY BUDGETS"
                   foreground: root.foreground
                   fontFamily: root.fontFamily
+                }
+
+                // What the trailing cadence letter on each row means.
+                Text {
+                  textFormat: Text.PlainText
+                  visible: budgetsSection.visible
+                  width: parent.width
+                  text: "reset: M monthly · W weekly · D daily · N never"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
                 }
 
                 Repeater {
@@ -1112,16 +1139,32 @@ Panel {
       id: budgetValue
       text: budgetRow.budget
         ? root.formatMoney(budgetRow.budget.used) + " / " + root.formatMoney(budgetRow.budget.limit)
-          + root.resetLetter(budgetRow.budget.reset)
         : ""
       color: budgetRow.alarming ? root.urgent : root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
       font.bold: true
       horizontalAlignment: Text.AlignRight
-      anchors.right: parent.right
+      anchors.right: resetLetterText.left
+      anchors.rightMargin: Style.space(3)
       anchors.verticalCenter: parent.verticalCenter
       width: Style.space(96)
+    }
+
+    // Trailing cadence letter: dimmed so it reads as an annotation, with
+    // its meaning spelled out in the row's tooltip.
+    Text {
+      textFormat: Text.PlainText
+      id: resetLetterText
+      visible: text !== ""
+      text: budgetRow.budget ? root.resetLetter(budgetRow.budget.reset) : ""
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      width: Style.space(10)
+      horizontalAlignment: Text.AlignRight
     }
 
     MouseArea {
