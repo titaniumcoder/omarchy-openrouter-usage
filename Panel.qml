@@ -10,8 +10,8 @@ import qs.Ui
 // first: the charts are dollars, and token counts ride in the tooltips.
 Panel {
   id: root
-  moduleName: "calmasacow.openrouter-usage-plus"
-  ipcTarget: "calmasacow.openrouter-usage-plus"
+  moduleName: "titaniumcoder.openrouter-usage"
+  ipcTarget: "titaniumcoder.openrouter-usage"
   manageIpc: false
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
