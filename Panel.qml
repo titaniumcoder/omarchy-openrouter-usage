@@ -23,7 +23,14 @@ Panel {
 
   readonly property var record: usage.record
   readonly property var balance: record ? (record.balance || null) : null
-  readonly property var days: record ? (record.recentDays || []) : []
+  // Daily bars prefer the account-wide feed (all keys, all devices) and
+  // fall back to the machine-local scan when no management key is set.
+  readonly property var days: {
+    var daily = record && record.dailyDays
+    if (daily && daily.length > 0) return daily
+    return record ? (record.recentDays || []) : []
+  }
+  readonly property string dailyScope: record ? String(record.dailyScope || "local") : "local"
   readonly property var models: modelRows(record)
   readonly property var activity: record ? (record.activity || null) : null
   readonly property var topModels: activityModelRows()
@@ -119,9 +126,12 @@ Panel {
       : dayName(day.date) + " " + (parsed.getMonth() + 1) + "/" + parsed.getDate()
     var text = label + " · " + formatCost(day.cost)
       + " · " + usage.formatTokenCount(Number(day.messageCount || 0)) + " tokens"
-    if (today && record)
+    if (today && record) {
       text += " · " + Number(record.todayPrompts || 0) + " prompts · "
         + Number(record.todaySessions || 0) + " sessions"
+      if (record.dailyScope === "account")
+        text += " · today is machine-local; other days are account-wide"
+    }
     return text
   }
 
@@ -586,7 +596,7 @@ Panel {
 
             PanelSectionHeader {
               width: parent.width
-              text: "SPEND BY DAY"
+              text: root.dailyScope === "account" ? "SPEND BY DAY · ACCOUNT" : "SPEND BY DAY"
               foreground: root.foreground
               fontFamily: root.fontFamily
             }

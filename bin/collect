@@ -576,7 +576,9 @@ def api_request(path: str, key: str, method: str = "GET", body: dict[str, Any] |
       raise ValueError("OpenRouter response too large")
     payload = json.loads(raw.decode("utf-8"))
   data = payload.get("data") if isinstance(payload, dict) else None
-  return data if isinstance(data, dict) else {}
+  # /activity wraps its rows in a list, not an object, so the envelope
+  # unwrapping has to pass lists through untouched.
+  return data if isinstance(data, (dict, list)) else {}
 
 
 def probe_account(key: str) -> dict[str, Any]:
@@ -841,7 +843,102 @@ def probe_activity(key: str, period: str) -> dict[str, Any]:
   }
 
 
-def collect_activity(period: str, force: bool, limits_only: bool, stats: dict[str, Any]) -> dict[str, Any]:
+# ------------------------------------------------------------------- daily
+#
+# The Spend by Day chart is account-wide, not per key: OpenRouter exposes
+# daily spend through /activity (day x model x endpoint rows) but that
+# endpoint carries no key dimension, while /analytics/query groups by key
+# but not by day. Account-wide is the same scope as the balance and the
+# Top Keys list, so the chart finally agrees with the rest of the panel.
+# The account feed lags the current day, so today's row comes from the
+# local session scan instead — live, machine-local, clearly the odd one.
+
+
+def probe_daily(key: str) -> dict[str, Any]:
+  try:
+    rows = api_request("/activity", key)
+  except urllib.error.HTTPError as error:
+    if error.code in (401, 403):
+      return {"ok": False, "needsManagementKey": True}
+    return {"ok": False}
+  except Exception:
+    return {"ok": False, "transport": True}
+  if not isinstance(rows, list):
+    return {"ok": False}
+  by_day: dict[str, dict[str, float]] = {}
+  for row in rows[:MAX_TRANSCRIPT_ENTRIES]:
+    if not isinstance(row, dict):
+      continue
+    day = clean_text(row.get("date"), 32)[:10]
+    if len(day) != 10:
+      continue
+    bucket = by_day.setdefault(day, {"cost": 0.0, "tokens": 0.0, "requests": 0.0})
+    # usage is rated spend in dollars; byok_usage_inference is excluded
+    # because BYOK traffic never touches the account's credit balance.
+    bucket["cost"] += money(row.get("usage"))
+    bucket["tokens"] += (
+      number(row.get("prompt_tokens"))
+      + number(row.get("completion_tokens"))
+      + number(row.get("reasoning_tokens"))
+    )
+    bucket["requests"] += number(row.get("requests"))
+  return {"ok": True, "byDay": by_day}
+
+
+def collect_daily(force: bool, stats: dict[str, Any]) -> dict[str, Any]:
+  cache_file = cache_root() / "openrouter-daily.json"
+  max_age = 0 if force else ACTIVITY_CACHE_SECONDS
+  by_day: Any = None
+  if max_age > 0:
+    cached = read_fresh_json(cache_file, float(max_age))
+    if cached is not None and isinstance(cached.get("byDay"), dict):
+      by_day = cached["byDay"]
+  if by_day is None:
+    key = management_key()
+    if key != "":
+      probe = probe_daily(key)
+      if probe.get("ok") and isinstance(probe.get("byDay"), dict):
+        write_json(cache_file, {"fetchedAtMs": round(time.time() * 1000), "byDay": probe["byDay"]})
+        by_day = probe["byDay"]
+      else:
+        # A failed probe falls back to the last good answer; a chart that
+        # flickers to local-only every time a request hiccups reads as a
+        # glitch, not as a graceful degradation.
+        stale = read_fresh_json(cache_file, float("inf")) or {}
+        if isinstance(stale.get("byDay"), dict):
+          by_day = stale["byDay"]
+  if not isinstance(by_day, dict):
+    return {"scope": "local", "days": []}
+
+  # Same seven date strings as the local scan, so the panel's Today logic
+  # keeps working: account numbers win where they exist, today's row falls
+  # back to the local scan because the feed has not closed the day yet.
+  local_days = {day.get("date"): day for day in (stats.get("recentDays") or []) if isinstance(day, dict)}
+  today = local_date_string()
+  days: list[dict[str, Any]] = []
+  for date in recent_date_strings():
+    account = by_day.get(date)
+    if isinstance(account, dict):
+      days.append({
+        "date": date,
+        "cost": round(money(account.get("cost")), 6),
+        "messageCount": number(account.get("tokens")),
+        "prompts": number(account.get("requests")),
+      })
+    elif date == today and date in local_days:
+      local = local_days[date]
+      days.append({
+        "date": date,
+        "cost": money(local.get("cost")),
+        "messageCount": number(local.get("messageCount")),
+        "prompts": number(local.get("prompts")),
+      })
+    else:
+      days.append({"date": date, "cost": 0.0, "messageCount": 0, "prompts": 0})
+  return {"scope": "account", "days": days}
+
+
+def collect_activity(period: str, force: bool, limits_only: bool, stats: dict[str, Any]):
   if period not in VALID_PERIODS:
     period = "1mo"
   fallback = local_activity(stats, period)
@@ -886,6 +983,7 @@ def main() -> int:
   stats = cached_scan(scan_age)
   account = collect_account(args.force)
   activity = collect_activity(args.period, args.force, args.limits_only, stats)
+  daily = collect_daily(args.force, stats)
 
   record = {
     "schemaVersion": 1,
@@ -903,7 +1001,10 @@ def main() -> int:
     "authHelpText": account.get("authHelpText") or "",
     "limits": account.get("limits") or [],
     "activity": activity,
+    "dailyScope": daily["scope"],
   }
+  if daily.get("days"):
+    record["dailyDays"] = daily["days"]
   if account.get("balance"):
     record["balance"] = account["balance"]
   if account.get("retryAdvised"):
