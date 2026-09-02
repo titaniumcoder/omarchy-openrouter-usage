@@ -22,6 +22,11 @@ Item {
   property var record: null
   property bool loading: false
   property string collectError: ""
+  property string stdoutBuf: ""
+  property string stderrBuf: ""
+  property bool outputOverflow: false
+  readonly property int maxCollectorOutput: 1024 * 1024
+  readonly property int maxCollectorError: 8192
 
   readonly property bool ready: !!record && record.ready === true
 
@@ -39,23 +44,51 @@ Item {
     id: collectProcess
     running: false
 
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.applyRecord(text)
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        if (root.outputOverflow) return
+        var piece = String(chunk || "")
+        if (root.stdoutBuf.length + piece.length > root.maxCollectorOutput) {
+          root.outputOverflow = true
+          collectProcess.running = false
+          return
+        }
+        root.stdoutBuf += piece
+      }
     }
 
-    stderr: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: if (text.trim() !== "") console.warn("openrouter-usage", text.trim())
+    stderr: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        if (root.stderrBuf.length >= root.maxCollectorError) return
+        root.stderrBuf += String(chunk || "").slice(0, root.maxCollectorError - root.stderrBuf.length)
+      }
     }
 
     onExited: {
+      collectDeadline.stop()
       root.loading = false
+      if (!root.outputOverflow) root.applyRecord(root.stdoutBuf)
+      else root.collectError = "Collector output exceeded its safety limit."
+      if (root.stderrBuf.trim() !== "") console.warn("openrouter-usage", root.stderrBuf.trim())
       if (root.pendingKind !== "") {
         var kind = root.pendingKind
         root.pendingKind = ""
         root.collect(kind)
       }
+    }
+  }
+
+  Timer {
+    id: collectDeadline
+    interval: 30000
+    repeat: false
+    onTriggered: {
+      if (!collectProcess.running) return
+      root.collectError = "Collector timed out."
+      root.outputOverflow = true
+      collectProcess.running = false
     }
   }
 
@@ -72,8 +105,12 @@ Item {
     command.push("--period")
     command.push(root.detailsPeriod === "7d" || root.detailsPeriod === "3mo" ? root.detailsPeriod : "1mo")
     loading = true
+    stdoutBuf = ""
+    stderrBuf = ""
+    outputOverflow = false
     collectProcess.command = command
     collectProcess.running = true
+    collectDeadline.restart()
   }
 
   function setPeriod(period) {
@@ -92,9 +129,10 @@ Item {
 
   function applyRecord(output) {
     try {
+      if (String(output || "").length > root.maxCollectorOutput) throw new Error("record too large")
       var parsed = JSON.parse(String(output || ""))
-      if (parsed && typeof parsed === "object") {
-        record = parsed
+      if (parsed && typeof parsed === "object" && parsed.schemaVersion === 1 && parsed.id === "openrouter") {
+        record = root.normalizeValue(parsed, 0)
         collectError = ""
         return
       }
@@ -102,6 +140,28 @@ Item {
       console.warn("openrouter-usage", "Ignoring bad record", e)
     }
     collectError = "Collector produced no usable record."
+  }
+
+  function normalizeValue(value, depth) {
+    if (depth > 8 || value === undefined || value === null) return null
+    if (typeof value === "string") return value.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 512)
+    if (typeof value === "number") return isFinite(value) ? value : 0
+    if (typeof value === "boolean") return value
+    if (Array.isArray(value)) {
+      var list = []
+      for (var i = 0; i < value.length && i < 128; i++) list.push(root.normalizeValue(value[i], depth + 1))
+      return list
+    }
+    if (typeof value === "object") {
+      var result = {}
+      var keys = Object.keys(value)
+      for (var j = 0; j < keys.length && j < 128; j++) {
+        var key = String(keys[j]).slice(0, 160)
+        result[key] = root.normalizeValue(value[keys[j]], depth + 1)
+      }
+      return result
+    }
+    return null
   }
 
   function refreshAll(force) { collect(force === true ? "force" : "normal") }

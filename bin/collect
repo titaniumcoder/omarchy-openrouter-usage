@@ -22,9 +22,13 @@ import datetime as dt
 import fcntl
 import json
 import os
+import secrets
+import signal
+import stat
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -37,17 +41,117 @@ PROBE_MIN_INTERVAL_SECONDS = 15
 ACTIVITY_CACHE_SECONDS = 300
 VALID_PERIODS = ("7d", "1mo", "3mo")
 PERIOD_DAYS = {"7d": 7, "1mo": 30, "3mo": 90}
+MAX_PRIVATE_FILE_BYTES = 512 * 1024
+MAX_HTTP_BYTES = 256 * 1024
+MAX_TRANSCRIPT_FILES = 512
+MAX_TRANSCRIPT_BYTES = 2 * 1024 * 1024
+MAX_SCAN_BYTES = 32 * 1024 * 1024
+MAX_LINE_BYTES = 256 * 1024
+MAX_MODEL_NAME = 160
+MAX_MODELS = 128
+MAX_RECORD_BYTES = 1024 * 1024
+SCAN_DEADLINE_SECONDS = 8
+COLLECT_DEADLINE_SECONDS = 25
+TRANSCRIPT_MAX_AGE_DAYS = 120
+
+
+class CollectionDeadline(RuntimeError):
+  pass
+
+
+def _deadline_expired(_signum, _frame):
+  raise CollectionDeadline("collector deadline exceeded")
+
+
+def clean_text(value: Any, limit: int = 256) -> str:
+  text = str(value or "")
+  return "".join(char for char in text if char >= " " and char != "\x7f")[:limit]
+
+
+def _validate_dir(fd: int, *, private: bool = False) -> None:
+  info = os.fstat(fd)
+  if not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, os.getuid()):
+    raise OSError("unsafe directory owner or type")
+  if info.st_uid == os.getuid() and info.st_mode & 0o022:
+    raise OSError("unsafe writable directory")
+  if private and info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) != 0o700:
+    os.fchmod(fd, 0o700)
+
+
+def open_owned_dir(path: Path, *, create: bool = False, private: bool = False) -> int:
+  """Open an absolute directory without following any pathname component."""
+  absolute = path.expanduser()
+  if not absolute.is_absolute():
+    raise OSError("directory path must be absolute")
+  parts = absolute.parts[1:]
+  fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+  user_scope = False
+  try:
+    for index, part in enumerate(parts):
+      if part in ("", ".", ".."):
+        raise OSError("unsafe directory component")
+      try:
+        child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=fd)
+      except FileNotFoundError:
+        if not create:
+          raise
+        os.mkdir(part, 0o700, dir_fd=fd)
+        child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=fd)
+      os.close(fd)
+      fd = child
+      info = os.fstat(fd)
+      if info.st_uid == os.getuid():
+        user_scope = True
+      # System ancestors may be remapped in a sandbox. From the first
+      # user-owned component onward, ownership cannot change again.
+      if user_scope and info.st_uid != os.getuid():
+        raise OSError("unsafe directory ownership transition")
+      if user_scope:
+        _validate_dir(fd, private=private and index == len(parts) - 1)
+      elif index == len(parts) - 1:
+        raise OSError("sensitive directory is not user-owned")
+    return fd
+  except Exception:
+    os.close(fd)
+    raise
+
+
+def read_private_json(path: Path, limit: int = MAX_PRIVATE_FILE_BYTES) -> dict[str, Any] | None:
+  try:
+    parent_fd = open_owned_dir(path.parent)
+    try:
+      fd = os.open(path.name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+      try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+          return None
+        if info.st_size > limit:
+          return None
+        chunks: list[bytes] = []
+        remaining = limit + 1
+        while remaining > 0:
+          chunk = os.read(fd, min(65536, remaining))
+          if not chunk:
+            break
+          chunks.append(chunk)
+          remaining -= len(chunk)
+        raw = b"".join(chunks)
+        if len(raw) > limit:
+          return None
+        parsed = json.loads(raw.decode("utf-8"))
+        return parsed if isinstance(parsed, dict) else None
+      finally:
+        os.close(fd)
+    finally:
+      os.close(parent_fd)
+  except (OSError, UnicodeError, json.JSONDecodeError):
+    return None
 
 
 def cache_root() -> Path:
   root = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omarchy" / "agent-usage"
-  root.mkdir(parents=True, exist_ok=True)
-  # Cached records carry spend and usage patterns; keep them out of reach
-  # of other local users regardless of the ambient umask.
-  try:
-    os.chmod(root, 0o700)
-  except OSError:
-    pass
+  fd = open_owned_dir(root, create=True, private=True)
+  os.close(fd)
   return root
 
 
@@ -136,25 +240,52 @@ def empty_bucket() -> dict[str, Any]:
 
 def read_fresh_json(path: Path, max_age_seconds: float) -> dict[str, Any] | None:
   try:
-    if time.time() - path.stat().st_mtime > max_age_seconds:
-      return None
-    data = json.loads(path.read_text(encoding="utf-8"))
-    return data if isinstance(data, dict) else None
-  except Exception:
+    parent_fd = open_owned_dir(path.parent, private=True)
+    try:
+      fd = os.open(path.name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+      try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > MAX_PRIVATE_FILE_BYTES
+            or time.time() - info.st_mtime > max_age_seconds):
+          return None
+        raw = os.read(fd, MAX_PRIVATE_FILE_BYTES + 1)
+        if len(raw) > MAX_PRIVATE_FILE_BYTES:
+          return None
+        data = json.loads(raw.decode("utf-8"))
+        return data if isinstance(data, dict) else None
+      finally:
+        os.close(fd)
+    finally:
+      os.close(parent_fd)
+  except (OSError, UnicodeError, json.JSONDecodeError):
     return None
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
-  tmp = path.with_name(path.name + ".tmp")
-  # O_EXCL refuses to follow a pre-planted symlink, and 0o600 keeps the
-  # spend data private no matter what umask the caller inherited.
-  fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_TRUNC, 0o600)
+  encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+  if len(encoded) > MAX_PRIVATE_FILE_BYTES:
+    raise ValueError("cache record too large")
+  directory_fd = open_owned_dir(path.parent, create=True, private=True)
+  tmp_name = f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+  fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
   try:
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-      handle.write(json.dumps(payload, separators=(",", ":")))
-    tmp.replace(path)
+    offset = 0
+    while offset < len(encoded):
+      offset += os.write(fd, encoded[offset:])
+    os.fsync(fd)
+    os.close(fd)
+    fd = -1
+    os.replace(tmp_name, path.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+    os.fsync(directory_fd)
   finally:
-    tmp.unlink(missing_ok=True)
+    if fd >= 0:
+      os.close(fd)
+    try:
+      os.unlink(tmp_name, dir_fd=directory_fd)
+    except FileNotFoundError:
+      pass
+    os.close(directory_fd)
 
 
 # ---------------------------------------------------------------- sessions
@@ -189,13 +320,37 @@ def scan_pi_usage(max_age_seconds: float) -> dict[str, Any]:
   today_prompt_count = 0
   today_token_total = 0
   today_cost = 0.0
+  scan_started = time.monotonic()
+  scanned_files = 0
+  scanned_bytes = 0
+  oldest_allowed = time.time() - TRANSCRIPT_MAX_AGE_DAYS * 86400
 
   for root in roots:
-    files = root.rglob("*.jsonl") if root.is_dir() else []
+    files = root.rglob("*.jsonl") if root.is_dir() and not root.is_symlink() else []
     for path in files:
+      if scanned_files >= MAX_TRANSCRIPT_FILES or scanned_bytes >= MAX_SCAN_BYTES or time.monotonic() - scan_started >= SCAN_DEADLINE_SECONDS:
+        break
       try:
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-          for line_number, line in enumerate(handle, 1):
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+            or info.st_mtime < oldest_allowed or info.st_size > MAX_TRANSCRIPT_BYTES):
+          os.close(fd)
+          continue
+        scanned_files += 1
+        file_bytes = 0
+        with os.fdopen(fd, "rb", closefd=True) as raw_handle:
+          for line_number in range(1, 1_000_001):
+            if time.monotonic() - scan_started >= SCAN_DEADLINE_SECONDS:
+              break
+            raw_line = raw_handle.readline(MAX_LINE_BYTES + 1)
+            if not raw_line:
+              break
+            file_bytes += len(raw_line)
+            scanned_bytes += len(raw_line)
+            if len(raw_line) > MAX_LINE_BYTES or file_bytes > MAX_TRANSCRIPT_BYTES or scanned_bytes > MAX_SCAN_BYTES:
+              break
+            line = raw_line.decode("utf-8", errors="replace")
             if '"usage"' not in line or '"assistant"' not in line:
               continue
             try:
@@ -220,7 +375,7 @@ def scan_pi_usage(max_age_seconds: float) -> dict[str, Any]:
                 input_tokens = total
               if total <= 0:
                 continue
-              model = str(message.get("model") or "openrouter")
+              model = clean_text(message.get("model") or "openrouter", MAX_MODEL_NAME) or "openrouter"
               day = local_date_from_timestamp(entry.get("timestamp") or message.get("timestamp"))
               cost = money((usage.get("cost") or {}).get("total") if isinstance(usage.get("cost"), dict) else usage.get("cost"))
             except Exception:
@@ -230,6 +385,8 @@ def scan_pi_usage(max_age_seconds: float) -> dict[str, Any]:
             sessions.add(session_key)
             active_days.add(day)
             prompts += 1
+            if model not in usage_by_model and len(usage_by_model) >= MAX_MODELS:
+              model = "other"
             bucket = usage_by_model.setdefault(model, empty_bucket())
             bucket["inputTokens"] += input_tokens
             bucket["outputTokens"] += output_tokens
@@ -268,10 +425,21 @@ def scan_pi_usage(max_age_seconds: float) -> dict[str, Any]:
 
 
 def cached_scan(max_age_seconds: float) -> dict[str, Any]:
-  lock_file = cache_root() / "openrouter-pi-sessions.lock"
-  with lock_file.open("a+") as lock:
-    fcntl.flock(lock, fcntl.LOCK_EX)
-    return scan_pi_usage(max_age_seconds)
+  directory_fd = open_owned_dir(cache_root(), create=True, private=True)
+  try:
+    fd = os.open("openrouter-pi-sessions.lock", os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=directory_fd)
+    try:
+      info = os.fstat(fd)
+      if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+        raise OSError("unsafe cache lock")
+      if stat.S_IMODE(info.st_mode) != 0o600:
+        os.fchmod(fd, 0o600)
+      fcntl.flock(fd, fcntl.LOCK_EX)
+      return scan_pi_usage(max_age_seconds)
+    finally:
+      os.close(fd)
+  finally:
+    os.close(directory_fd)
 
 
 # ------------------------------------------------------------------- limits
@@ -285,25 +453,21 @@ def cached_scan(max_age_seconds: float) -> dict[str, Any]:
 
 
 def read_config() -> dict[str, Any]:
-  try:
-    parsed = json.loads(config_path().read_text(encoding="utf-8"))
-    return parsed if isinstance(parsed, dict) else {}
-  except (OSError, json.JSONDecodeError):
-    return {}
+  return read_private_json(config_path(), 16 * 1024) or {}
 
 
 def api_key() -> str:
-  key = str(os.environ.get("OPENROUTER_API_KEY", "")).strip()
+  key = clean_text(os.environ.get("OPENROUTER_API_KEY", ""), 512).strip()
   if key:
     return key
-  return str(read_config().get("apiKey") or "").strip()
+  return clean_text(read_config().get("apiKey"), 512).strip()
 
 
 def management_key() -> str:
-  key = str(os.environ.get("OPENROUTER_MANAGEMENT_KEY", "")).strip()
+  key = clean_text(os.environ.get("OPENROUTER_MANAGEMENT_KEY", ""), 512).strip()
   if key:
     return key
-  return str(read_config().get("managementKey") or "").strip()
+  return clean_text(read_config().get("managementKey"), 512).strip()
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -331,7 +495,14 @@ def api_request(path: str, key: str, method: str = "GET", body: dict[str, Any] |
     method=method,
   )
   with _opener.open(request, timeout=10) as response:
-    payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    final = urllib.parse.urlsplit(response.geturl())
+    expected = urllib.parse.urlsplit(API_BASE_URL)
+    if final.scheme != "https" or final.hostname != expected.hostname or final.port not in (None, 443):
+      raise urllib.error.URLError("unexpected response origin")
+    raw = response.read(MAX_HTTP_BYTES + 1)
+    if len(raw) > MAX_HTTP_BYTES:
+      raise ValueError("OpenRouter response too large")
+    payload = json.loads(raw.decode("utf-8"))
   data = payload.get("data") if isinstance(payload, dict) else None
   return data if isinstance(data, dict) else {}
 
@@ -453,7 +624,7 @@ def analytics_rows(result: dict[str, Any]) -> list[dict[str, Any]]:
   rows = result.get("data")
   if not isinstance(rows, list):
     return []
-  return [row for row in rows if isinstance(row, dict)]
+  return [row for row in rows[:64] if isinstance(row, dict)]
 
 
 def ranked_tokens(rows: list[dict[str, Any]], name_key: str, limit: int) -> list[dict[str, Any]]:
@@ -462,7 +633,7 @@ def ranked_tokens(rows: list[dict[str, Any]], name_key: str, limit: int) -> list
     raw = row.get(name_key)
     if raw is None:
       continue
-    label = str(raw).strip()
+    label = clean_text(raw, MAX_MODEL_NAME).strip()
     if label == "" or label.lower() in ("null", "none", "unset", "(unset)"):
       continue
     items.append({
@@ -488,7 +659,7 @@ def ranked_local_models(usage_by_model: Any, limit: int) -> list[dict[str, Any]]
       + number(bucket.get("cacheCreationInputTokens"))
     )
     items.append({
-      "name": str(model_id),
+      "name": clean_text(model_id, MAX_MODEL_NAME),
       "tokens": tokens,
       "cost": money(bucket.get("cost")),
     })
@@ -630,6 +801,8 @@ def collect_activity(period: str, force: bool, limits_only: bool, stats: dict[st
 
 
 def main() -> int:
+  signal.signal(signal.SIGALRM, _deadline_expired)
+  signal.alarm(COLLECT_DEADLINE_SECONDS)
   parser = argparse.ArgumentParser()
   parser.add_argument("--force", action="store_true", help="rescan sessions and re-probe the account, ignoring caches")
   parser.add_argument("--limits-only", action="store_true", help="reuse any recent session scan; only the account probe must be fresh")
@@ -664,7 +837,11 @@ def main() -> int:
   if account.get("retryAdvised"):
     record["retryAdvised"] = True
   record.update(stats)
-  print(json.dumps(record, separators=(",", ":"), sort_keys=True))
+  encoded = json.dumps(record, separators=(",", ":"), sort_keys=True)
+  if len(encoded.encode("utf-8")) > MAX_RECORD_BYTES:
+    raise ValueError("collector record exceeds output limit")
+  print(encoded)
+  signal.alarm(0)
   return 0
 
 

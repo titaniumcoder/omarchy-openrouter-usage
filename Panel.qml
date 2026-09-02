@@ -27,8 +27,8 @@ Panel {
   readonly property var models: modelRows(record)
   readonly property var activity: record ? (record.activity || null) : null
   readonly property var topModels: activityModelRows()
-  readonly property var topApps: activity && activity.topApps ? activity.topApps : []
-  readonly property var topKeys: activity && activity.topKeys ? activity.topKeys : []
+  readonly property var topApps: activity && Array.isArray(activity.topApps) ? activity.topApps.slice(0, 3) : []
+  readonly property var topKeys: activity && Array.isArray(activity.topKeys) ? activity.topKeys.slice(0, 3) : []
 
   readonly property bool detailsExpanded: root.setting("detailsExpanded", false) === true
 
@@ -324,6 +324,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           anchors.centerIn: parent
           visible: barMark.status !== Image.Ready
           text: button.text
@@ -334,6 +335,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         visible: text !== ""
         text: root.barBalanceLabel
         color: root.balanceAlarming ? root.urgent : root.barForeground
@@ -443,6 +445,7 @@ Panel {
                   width: Math.max(heroAmount.implicitWidth, heroRemaining.implicitWidth)
 
                   Text {
+                    textFormat: Text.PlainText
                     id: heroAmount
                     width: parent.width
                     text: header.amountText
@@ -454,6 +457,7 @@ Panel {
                   }
 
                   Text {
+                    textFormat: Text.PlainText
                     id: heroRemaining
                     width: parent.width
                     text: "REMAINING"
@@ -482,6 +486,7 @@ Panel {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   anchors.centerIn: parent
                   visible: heroMarkImage.status !== Image.Ready
                   text: button.text
@@ -504,6 +509,7 @@ Panel {
             radius: Style.cornerRadius
 
             Text {
+              textFormat: Text.PlainText
               id: statusText
               anchors.left: parent.left
               anchors.right: parent.right
@@ -640,6 +646,7 @@ Panel {
                 border.color: root.alpha(root.foreground, detailsPeriodMa.containsMouse ? 0.5 : 0.35)
 
                 Text {
+                  textFormat: Text.PlainText
                   id: detailsPeriodLabel
                   anchors.centerIn: parent
                   text: root.periodLabel(usage.detailsPeriod) + " ▾"
@@ -671,6 +678,7 @@ Panel {
                 border.color: root.alpha(root.foreground, detailsToggleMa.containsMouse ? 0.5 : 0.35)
 
                 Text {
+                  textFormat: Text.PlainText
                   anchors.centerIn: parent
                   text: root.detailsExpanded ? "COLLAPSE" : "EXPAND"
                   color: root.foreground
@@ -725,6 +733,7 @@ Panel {
               }
 
               Text {
+                textFormat: Text.PlainText
                 visible: text !== ""
                 width: parent.width
                 text: root.activityHint()
@@ -809,6 +818,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: text !== ""
             width: parent.width
             topPadding: Style.space(2)
@@ -849,6 +859,7 @@ Panel {
       spacing: Style.space(4)
 
       Text {
+        textFormat: Text.PlainText
         id: linkIcon
         anchors.horizontalCenter: parent.horizontalCenter
         text: linkTile.icon
@@ -858,6 +869,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         id: linkCaption
         width: parent.width
         text: linkTile.label
@@ -910,6 +922,7 @@ Panel {
     implicitHeight: Math.max(dayLabelText.implicitHeight, dayValue.implicitHeight) + Style.spacing.sm
 
     Text {
+      textFormat: Text.PlainText
       id: dayLabelText
       text: root.dayLabel(dayRow.day ? dayRow.day.date : "", dayRow.today)
       color: dayRow.today ? root.foreground : root.dim
@@ -947,6 +960,7 @@ Panel {
     }
 
     Text {
+      textFormat: Text.PlainText
       id: dayValue
       text: root.formatCost(dayRow.day ? dayRow.day.cost : 0)
       color: dayRow.today ? root.foreground : root.dim
@@ -1002,6 +1016,7 @@ Panel {
     }
 
     Text {
+      textFormat: Text.PlainText
       id: modelName
       text: modelRow.row ? modelRow.row.name : ""
       color: root.foreground
@@ -1016,6 +1031,7 @@ Panel {
     }
 
     Text {
+      textFormat: Text.PlainText
       id: modelCost
       text: modelRow.row ? root.formatCost(modelRow.row.cost) : ""
       color: root.dim
@@ -1059,6 +1075,7 @@ Panel {
       spacing: Style.space(2)
 
       Text {
+        textFormat: Text.PlainText
         id: statLabel
         width: parent.width
         text: statCard.label
@@ -1069,6 +1086,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         id: statValue
         width: parent.width
         text: statCard.value
@@ -1088,6 +1106,7 @@ Panel {
     implicitHeight: Math.max(rankedName.implicitHeight, rankedValue.implicitHeight) + Style.spacing.sm
 
     Text {
+      textFormat: Text.PlainText
       id: rankedName
       text: rankedRow.row ? String(rankedRow.row.name || "") : ""
       color: root.foreground
@@ -1101,6 +1120,7 @@ Panel {
     }
 
     Text {
+      textFormat: Text.PlainText
       id: rankedValue
       text: rankedRow.row ? root.formatActivityTokens(rankedRow.row.tokens) : ""
       color: root.dim
