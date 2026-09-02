@@ -41,6 +41,9 @@ Panel {
   readonly property var topModels: activityModelRows()
   readonly property var topApps: activity && Array.isArray(activity.topApps) ? activity.topApps.slice(0, 3) : []
   readonly property var topKeys: activity && Array.isArray(activity.topKeys) ? activity.topKeys.slice(0, 3) : []
+  // Per-key spend budgets from /keys: limit is the cap, used the current
+  // period's draw, reset the cadence. Sorted most-drained first.
+  readonly property var keyBudgets: record && Array.isArray(record.keyBudgets) ? record.keyBudgets : []
 
   readonly property bool detailsExpanded: root.setting("detailsExpanded", false) === true
 
@@ -91,6 +94,14 @@ Panel {
     if (!b || !(b.funded > 0)) return ""
     var text = formatMoney(b.spent, b.currency) + " spent of " + formatMoney(b.funded, b.currency) + " funded"
     if (b.estimated) text += " · estimated"
+    return text
+  }
+
+  function budgetTooltip(b) {
+    if (!b) return ""
+    var text = formatMoney(b.used) + " of " + formatMoney(b.limit) + " · " + formatMoney(b.remaining) + " left"
+    var reset = String(b.reset || "")
+    if (reset !== "") text += " · resets " + reset
     return text
   }
 
@@ -686,6 +697,37 @@ Panel {
             }
           }
 
+          // ---------- Key budgets (per-key spend caps) ----------
+          PanelSeparator {
+            visible: budgetsSection.visible
+            foreground: root.foreground
+          }
+
+          Column {
+            id: budgetsSection
+            visible: root.keyBudgets.length > 0
+            width: parent.width
+            spacing: Style.spacing.md
+
+            PanelSectionHeader {
+              width: parent.width
+              text: "KEY BUDGETS"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Repeater {
+              model: root.keyBudgets
+
+              BudgetRow {
+                required property var modelData
+
+                width: budgetsSection.width
+                budget: modelData
+              }
+            }
+          }
+
           // ---------- Details (cards, top models, apps, keys) ----------
           PanelSeparator {
             visible: detailsSection.visible
@@ -994,6 +1036,73 @@ Panel {
 
   // One row per day: label, bar, dollars. Today is picked out in full
   // foreground; the rest of the week sits dimmed behind it.
+  // One budget row: key name, drain meter, used/limit. The meter turns
+  // urgent past 90% of the cap, mirroring the balance gauge.
+  component BudgetRow: Item {
+    id: budgetRow
+    property var budget: null
+
+    readonly property real drain: budget && budget.limit > 0
+      ? root.clamp(Number(budget.used || 0) / Number(budget.limit), 0, 1)
+      : 0
+    readonly property bool alarming: drain >= 0.9
+
+    implicitHeight: Math.max(budgetName.implicitHeight, budgetValue.implicitHeight) + Style.spacing.sm
+
+    Text {
+      textFormat: Text.PlainText
+      id: budgetName
+      text: budgetRow.budget ? String(budgetRow.budget.name || "") : ""
+      color: budgetRow.alarming ? root.urgent : (budgetRow.drain > 0 ? root.foreground : root.dim)
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      font.bold: budgetRow.alarming
+      elide: Text.ElideRight
+      anchors.left: parent.left
+      anchors.verticalCenter: parent.verticalCenter
+      width: Style.space(96)
+    }
+
+    Meter {
+      anchors.left: budgetName.right
+      anchors.right: budgetValue.left
+      anchors.leftMargin: Style.space(8)
+      anchors.rightMargin: Style.space(10)
+      anchors.verticalCenter: parent.verticalCenter
+      value: budgetRow.drain
+      alarming: budgetRow.alarming
+    }
+
+    Text {
+      textFormat: Text.PlainText
+      id: budgetValue
+      text: budgetRow.budget
+        ? root.formatMoney(budgetRow.budget.used) + " / " + root.formatMoney(budgetRow.budget.limit)
+        : ""
+      color: budgetRow.alarming ? root.urgent : root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      font.bold: true
+      horizontalAlignment: Text.AlignRight
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      width: Style.space(96)
+    }
+
+    MouseArea {
+      id: budgetHover
+      anchors.fill: parent
+      hoverEnabled: true
+      acceptedButtons: Qt.NoButton
+    }
+
+    PanelToolTip {
+      visible: budgetHover.containsMouse
+      text: root.budgetTooltip(budgetRow.budget)
+      fontFamily: root.fontFamily
+    }
+  }
+
   component DayRow: Item {
     id: dayRow
     property var day: null

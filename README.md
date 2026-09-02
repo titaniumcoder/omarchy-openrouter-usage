@@ -8,6 +8,7 @@ Live OpenRouter account usage in the Omarchy (Quattro / 4.x) bar, powered entire
 - **Header** — remaining balance, tier
 - **Shortcuts** — Add Credits, Full Activity, Manage Keys, Browse Models
 - **Spend by day** — last 7 days of account-wide spend; each bar is segmented by the week's **top three API keys** (consistent colors across days), with everything else folded into **Other** and a ranked legend underneath
+- **Key budgets** — per-key spend caps with drain meters (from OpenRouter's per-key limits), sorted most-drained first; turns red at 90%
 - **Details** — spend, requests, tokens, cache hit rate, top models, top apps, top keys
 
 Derived from [calmasacow/omarchy-openrouter-usage-plus](https://github.com/calmasacow/omarchy-openrouter-usage-plus) (MIT, itself derived from sepehr500's widget).
@@ -54,6 +55,7 @@ Example (`examples/config/omarchy/agents/openrouter.json`):
 | Key limit bar | `/key` | only if a per-key limit is set on the key |
 | Spend by day (7 days) | `/analytics/query`, one query per day | account-wide, all keys, all devices; local-calendar day windows converted to UTC; today's partial day included |
 | Key-colored bars + legend | `/analytics/query` grouped by `api_key_id` | ranked by cost across the whole week; top 3 get fixed hues, the rest is Other; a single-key account renders plain |
+| Key budgets | `/keys` | per-key cap (`limit`), current-period draw (`limit - limit_remaining`), and reset cadence; hidden entirely when no key has a cap set |
 | Details cards & ranked lists | `/analytics/query` | 7d / 1mo / 3mo window, switchable in the panel |
 
 All figures are account-global — the same panel on every machine synced to the same account shows the same numbers. Data is cached for ~5 minutes (right-click the bar mark, or press `r` in the panel, to force a refresh); a failed API probe serves the last good data instead of flickering.

@@ -372,6 +372,41 @@ def probe_account(key: str) -> dict[str, Any]:
       "resetsAt": "",
     })
 
+  # /keys carries each key's spend budget: limit is the per-key cap,
+  # limit_remaining what's left in the current period (usage itself is
+  # lifetime, not period, so it must not be read as budget progress).
+  try:
+    keys_wrap = api_request("/keys", key)
+    # /keys wraps its rows once ({data: [...]}) while /key nests deeper;
+    # accept either shape so a future reshuffle cannot blank the section.
+    if isinstance(keys_wrap, list):
+      keys = keys_wrap
+    elif isinstance(keys_wrap, dict):
+      keys = keys_wrap.get("data")
+      keys = keys.get("data") if isinstance(keys, dict) else keys
+    else:
+      keys = None
+    budgets = []
+    for row in (keys if isinstance(keys, list) else [])[:64]:
+      if not isinstance(row, dict):
+        continue
+      limit = money(row.get("limit"))
+      if limit <= 0:
+        continue
+      remaining_raw = row.get("limit_remaining")
+      remaining = money(remaining_raw) if remaining_raw is not None else max(0.0, limit - money(row.get("usage")))
+      budgets.append({
+        "name": clean_text(row.get("name"), MAX_MODEL_NAME) or "Unnamed key",
+        "limit": round(limit, 2),
+        "used": round(max(0.0, limit - remaining), 6),
+        "remaining": round(remaining, 6),
+        "reset": clean_text(row.get("limit_reset"), 32),
+      })
+    budgets.sort(key=lambda item: item["used"] / item["limit"], reverse=True)
+    result["keyBudgets"] = budgets
+  except Exception:
+    pass
+
   # usageStatusText is the panel's error channel: any non-empty value
   # renders as an urgent card with authHelpText as the remedy. A healthy
   # probe must leave it empty; the balance block already tells the story.
@@ -406,6 +441,7 @@ def collect_account(force: bool) -> dict[str, Any]:
       "balance": probe["balance"],
       "limits": probe["limits"],
       "tierLabel": probe["tierLabel"],
+      "keyBudgets": probe.get("keyBudgets") or [],
       "usageStatusText": "",
     }
     result.update(account)
@@ -718,6 +754,8 @@ def main() -> int:
     record["balance"] = account["balance"]
   if account.get("retryAdvised"):
     record["retryAdvised"] = True
+  if account.get("keyBudgets"):
+    record["keyBudgets"] = account["keyBudgets"]
   encoded = json.dumps(record, separators=(",", ":"), sort_keys=True)
   if len(encoded.encode("utf-8")) > MAX_RECORD_BYTES:
     raise ValueError("collector record exceeds output limit")
