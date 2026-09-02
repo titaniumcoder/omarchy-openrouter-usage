@@ -140,7 +140,7 @@ Panel {
     if (today && record)
       text += " · " + Number(record.todayPrompts || 0) + " prompts · "
         + Number(record.todaySessions || 0) + " sessions"
-    if (root.keyedBars && Array.isArray(day.keys)) {
+    if (root.keyedBars && day.keys && day.keys.length > 0) {
       var other = 0
       for (var i = 0; i < day.keys.length; i++) {
         var k = day.keys[i] || {}
@@ -176,7 +176,9 @@ Panel {
   // One day's bar as a list of {index, start, fraction} segments, in rank
   // order, followed by Other. Empty when the chart renders plain.
   function daySegments(day) {
-    if (!root.keyedBars || !day || !Array.isArray(day.keys) || day.keys.length === 0) return []
+    // day.keys arrives as a Qt list wrapper inside Repeater delegates, so a
+    // length check is the only portable guard — Array.isArray lies there.
+    if (!root.keyedBars || !day || !day.keys || !(day.keys.length > 0)) return []
     var total = Number(day.cost || 0)
     if (!(total > 0)) return []
     var top = [], other = 0
@@ -719,6 +721,7 @@ Panel {
 
                 width: spendSection.width
                 day: modelData
+                segs: root.daySegments(modelData)
                 ratio: Number(modelData.cost || 0) / spendSection.peak
                 today: String(modelData.date || "") === root.todayDate()
               }
@@ -1036,6 +1039,10 @@ Panel {
   component DayRow: Item {
     id: dayRow
     property var day: null
+    // Precomputed by the parent delegate: [{index, start, fraction}, ...]
+    // in bar order, followed by Other (index -1) when present. Empty for
+    // plain bars.
+    property var segs: []
     property real ratio: 0
     property bool today: false
 
@@ -1076,33 +1083,69 @@ Panel {
           NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
         }
 
-        // Keyed mode: one segment per top-three key in rank order, then
-        // Other. Overlapping by a hair prevents seams between neighbors.
-        Repeater {
-          id: daySegRepeater
-          model: root.daySegments(dayRow.day)
+        // Keyed mode: static slots instead of a Repeater — one per top-three
+        // rank plus Other. Overlapping by a hair prevents seams.
+        Rectangle {
+          id: seg0
+          readonly property var seg: dayRow.segs.length > 0 ? dayRow.segs[0] : null
+          x: seg ? dayFill.width * seg.start : 0
+          width: seg ? dayFill.width * seg.fraction + 1 : 0
+          height: parent.height
+          topLeftRadius: dayTrack.radius
+          bottomLeftRadius: dayTrack.radius
+          topRightRadius: !seg1.visible && !seg2.visible && !seg3.visible ? dayTrack.radius : 0
+          bottomRightRadius: !seg1.visible && !seg2.visible && !seg3.visible ? dayTrack.radius : 0
+          visible: seg !== null
+          color: seg ? (seg.index >= 0 ? root.keyColor(seg.index) : root.alpha(root.foreground, 0.55)) : "transparent"
+        }
 
-          delegate: Rectangle {
-            required property var modelData
-            required property int index
-            x: dayFill.width * modelData.start
-            width: dayFill.width * modelData.fraction + 1
-            height: parent.height
-            topLeftRadius: index === 0 ? dayTrack.radius : 0
-            bottomLeftRadius: index === 0 ? dayTrack.radius : 0
-            topRightRadius: index === daySegRepeater.count - 1 ? dayTrack.radius : 0
-            bottomRightRadius: index === daySegRepeater.count - 1 ? dayTrack.radius : 0
-            color: modelData.index >= 0
-              ? root.keyColor(modelData.index)
-              : root.alpha(root.foreground, 0.55)
-          }
+        Rectangle {
+          id: seg1
+          readonly property var seg: dayRow.segs.length > 1 ? dayRow.segs[1] : null
+          x: seg ? dayFill.width * seg.start : 0
+          width: seg ? dayFill.width * seg.fraction + 1 : 0
+          height: parent.height
+          topLeftRadius: !seg0.visible ? dayTrack.radius : 0
+          bottomLeftRadius: !seg0.visible ? dayTrack.radius : 0
+          topRightRadius: !seg2.visible && !seg3.visible ? dayTrack.radius : 0
+          bottomRightRadius: !seg2.visible && !seg3.visible ? dayTrack.radius : 0
+          visible: seg !== null
+          color: seg ? (seg.index >= 0 ? root.keyColor(seg.index) : root.alpha(root.foreground, 0.55)) : "transparent"
+        }
+
+        Rectangle {
+          id: seg2
+          readonly property var seg: dayRow.segs.length > 2 ? dayRow.segs[2] : null
+          x: seg ? dayFill.width * seg.start : 0
+          width: seg ? dayFill.width * seg.fraction + 1 : 0
+          height: parent.height
+          topLeftRadius: !seg0.visible && !seg1.visible ? dayTrack.radius : 0
+          bottomLeftRadius: !seg0.visible && !seg1.visible ? dayTrack.radius : 0
+          topRightRadius: !seg3.visible ? dayTrack.radius : 0
+          bottomRightRadius: !seg3.visible ? dayTrack.radius : 0
+          visible: seg !== null
+          color: seg ? (seg.index >= 0 ? root.keyColor(seg.index) : root.alpha(root.foreground, 0.55)) : "transparent"
+        }
+
+        Rectangle {
+          id: seg3
+          readonly property var seg: dayRow.segs.length > 3 ? dayRow.segs[3] : null
+          x: seg ? dayFill.width * seg.start : 0
+          width: seg ? dayFill.width * seg.fraction + 1 : 0
+          height: parent.height
+          topLeftRadius: !seg0.visible && !seg1.visible && !seg2.visible ? dayTrack.radius : 0
+          bottomLeftRadius: !seg0.visible && !seg1.visible && !seg2.visible ? dayTrack.radius : 0
+          topRightRadius: dayTrack.radius
+          bottomRightRadius: dayTrack.radius
+          visible: seg !== null
+          color: seg ? (seg.index >= 0 ? root.keyColor(seg.index) : root.alpha(root.foreground, 0.55)) : "transparent"
         }
 
         // Plain mode: the original monochrome fill.
         Rectangle {
           anchors.fill: parent
           radius: dayTrack.radius
-          visible: root.daySegments(dayRow.day).length === 0
+          visible: dayRow.segs.length === 0
           color: dayRow.today ? root.foreground : root.alpha(root.foreground, 0.55)
         }
       }
