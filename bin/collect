@@ -53,6 +53,7 @@ MAX_RECORD_BYTES = 1024 * 1024
 SCAN_DEADLINE_SECONDS = 8
 COLLECT_DEADLINE_SECONDS = 25
 TRANSCRIPT_MAX_AGE_DAYS = 120
+MAGIC_OBJECT_KEYS = {"__proto__", "constructor", "prototype"}
 
 
 class CollectionDeadline(RuntimeError):
@@ -66,6 +67,11 @@ def _deadline_expired(_signum, _frame):
 def clean_text(value: Any, limit: int = 256) -> str:
   text = str(value or "")
   return "".join(char for char in text if char >= " " and char != "\x7f")[:limit]
+
+
+def safe_data_key(value: Any, fallback: str = "other") -> str:
+  key = clean_text(value, MAX_MODEL_NAME) or fallback
+  return fallback if key in MAGIC_OBJECT_KEYS else key
 
 
 def _validate_dir(fd: int, *, private: bool = False) -> None:
@@ -87,6 +93,9 @@ def open_owned_dir(path: Path, *, create: bool = False, private: bool = False) -
   fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
   user_scope = False
   try:
+    root_info = os.fstat(fd)
+    if root_info.st_uid != 0 or root_info.st_mode & 0o022:
+      raise OSError("unsafe filesystem root")
     for index, part in enumerate(parts):
       if part in ("", ".", ".."):
         raise OSError("unsafe directory component")
@@ -102,18 +111,81 @@ def open_owned_dir(path: Path, *, create: bool = False, private: bool = False) -
       info = os.fstat(fd)
       if info.st_uid == os.getuid():
         user_scope = True
-      # System ancestors may be remapped in a sandbox. From the first
-      # user-owned component onward, ownership cannot change again.
-      if user_scope and info.st_uid != os.getuid():
-        raise OSError("unsafe directory ownership transition")
+      # Before entering the caller's tree, only non-writable root-owned
+      # system ancestors are accepted. Ownership cannot change afterward.
       if user_scope:
+        if info.st_uid != os.getuid():
+          raise OSError("unsafe directory ownership transition")
         _validate_dir(fd, private=private and index == len(parts) - 1)
+      elif info.st_uid != 0 or info.st_mode & 0o022:
+        raise OSError("unsafe system directory ancestor")
       elif index == len(parts) - 1:
         raise OSError("sensitive directory is not user-owned")
     return fd
   except Exception:
     os.close(fd)
     raise
+
+
+def _validate_transcript_dir(fd: int) -> None:
+  info = os.fstat(fd)
+  if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+      or info.st_mode & 0o022):
+    raise OSError("unsafe transcript directory")
+
+
+def iter_transcript_files(root: Path, deadline: float):
+  """Yield verified transcript leaf fds from a held, no-follow directory tree."""
+  try:
+    root_fd = open_owned_dir(root)
+    _validate_transcript_dir(root_fd)
+  except OSError:
+    return
+
+  stack: list[tuple[int, str, int]] = [(root_fd, str(root), 0)]
+  try:
+    while stack:
+      if time.monotonic() >= deadline:
+        break
+      directory_fd, display_path, depth = stack.pop()
+      try:
+        if depth > 16:
+          continue
+        with os.scandir(directory_fd) as entries:
+          for entry in entries:
+            if time.monotonic() >= deadline:
+              break
+            name = entry.name
+            if name in (".", ".."):
+              continue
+            try:
+              info = entry.stat(follow_symlinks=False)
+              if stat.S_ISDIR(info.st_mode):
+                child_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=directory_fd)
+                try:
+                  child_info = os.fstat(child_fd)
+                  _validate_transcript_dir(child_fd)
+                  if (child_info.st_dev, child_info.st_ino) != (info.st_dev, info.st_ino):
+                    raise OSError("transcript directory changed during traversal")
+                except Exception:
+                  os.close(child_fd)
+                  continue
+                stack.append((child_fd, f"{display_path}/{name}", depth + 1))
+              elif name.endswith(".jsonl") and stat.S_ISREG(info.st_mode):
+                leaf_fd = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
+                leaf_info = os.fstat(leaf_fd)
+                if (not stat.S_ISREG(leaf_info.st_mode) or leaf_info.st_uid != os.getuid()
+                    or (leaf_info.st_dev, leaf_info.st_ino) != (info.st_dev, info.st_ino)):
+                  os.close(leaf_fd)
+                  continue
+                yield leaf_fd, leaf_info, f"{display_path}/{name}"
+            except OSError:
+              continue
+      finally:
+        os.close(directory_fd)
+  finally:
+    for directory_fd, _display_path, _depth in stack:
+      os.close(directory_fd)
 
 
 def read_private_json(path: Path, limit: int = MAX_PRIVATE_FILE_BYTES) -> dict[str, Any] | None:
@@ -324,17 +396,17 @@ def scan_pi_usage(max_age_seconds: float) -> dict[str, Any]:
   scanned_files = 0
   scanned_bytes = 0
   oldest_allowed = time.time() - TRANSCRIPT_MAX_AGE_DAYS * 86400
+  scan_deadline = scan_started + SCAN_DEADLINE_SECONDS
 
   for root in roots:
-    files = root.rglob("*.jsonl") if root.is_dir() and not root.is_symlink() else []
-    for path in files:
+    files = iter_transcript_files(root, scan_deadline)
+    for fd, info, session_path in files:
       if scanned_files >= MAX_TRANSCRIPT_FILES or scanned_bytes >= MAX_SCAN_BYTES or time.monotonic() - scan_started >= SCAN_DEADLINE_SECONDS:
+        os.close(fd)
+        files.close()
         break
       try:
-        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
-        info = os.fstat(fd)
-        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
-            or info.st_mtime < oldest_allowed or info.st_size > MAX_TRANSCRIPT_BYTES):
+        if info.st_mtime < oldest_allowed or info.st_size > MAX_TRANSCRIPT_BYTES:
           os.close(fd)
           continue
         scanned_files += 1
@@ -360,7 +432,7 @@ def scan_pi_usage(max_age_seconds: float) -> dict[str, Any]:
                 continue
               if str(message.get("provider") or "") != "openrouter":
                 continue
-              unique_key = f"{path}:{entry.get('id') or line_number}"
+              unique_key = f"{session_path}:{entry.get('id') or line_number}"
               if unique_key in seen:
                 continue
               seen.add(unique_key)
@@ -375,13 +447,13 @@ def scan_pi_usage(max_age_seconds: float) -> dict[str, Any]:
                 input_tokens = total
               if total <= 0:
                 continue
-              model = clean_text(message.get("model") or "openrouter", MAX_MODEL_NAME) or "openrouter"
+              model = safe_data_key(message.get("model") or "openrouter", "openrouter")
               day = local_date_from_timestamp(entry.get("timestamp") or message.get("timestamp"))
               cost = money((usage.get("cost") or {}).get("total") if isinstance(usage.get("cost"), dict) else usage.get("cost"))
             except Exception:
               continue
 
-            session_key = str(path)
+            session_key = session_path
             sessions.add(session_key)
             active_days.add(day)
             prompts += 1

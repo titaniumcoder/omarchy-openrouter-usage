@@ -153,10 +153,22 @@ Item {
       return list
     }
     if (typeof value === "object") {
-      var result = {}
+      var result = Object.create(null)
       var keys = Object.keys(value)
+      var topLevel = {
+        schemaVersion: true, id: true, name: true, updatedAt: true, ready: true,
+        hasLocalStats: true, scope: true, tierLabel: true, usageStatusText: true,
+        authHelpText: true, limits: true, activity: true, balance: true,
+        retryAdvised: true, hasCostStats: true, todayPrompts: true,
+        todaySessions: true, todayTotalTokens: true, todayTokensByModel: true,
+        recentDays: true, modelUsage: true, totalPrompts: true,
+        totalSessions: true, activeDays: true, activeDates: true,
+        todayLocalCost: true
+      }
       for (var j = 0; j < keys.length && j < 128; j++) {
         var key = String(keys[j]).slice(0, 160)
+        if (key === "__proto__" || key === "constructor" || key === "prototype") continue
+        if (depth === 0 && topLevel[key] !== true) continue
         result[key] = root.normalizeValue(value[keys[j]], depth + 1)
       }
       return result
