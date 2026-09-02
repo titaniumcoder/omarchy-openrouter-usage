@@ -4,15 +4,19 @@
 # omarchy:hidden=true
 """Collect OpenRouter usage into one display-ready JSON record.
 
-Everything the agents panel shows for OpenRouter comes from this one
-command: local session stats from pi/omp sessions that ran on the
-OpenRouter provider, and the authoritative credit balance and key usage
-from OpenRouter's REST API. The panel itself only ever reads the JSON
-this prints; it never talks to disk formats or endpoints.
+Everything the panel shows comes from OpenRouter's REST API with a
+management key: the credit balance and per-key limits from /credits
+and /key, the Details cards and ranked lists from /analytics/query,
+and the day x key matrix behind the Spend by Day chart. The panel
+itself only ever reads the JSON this prints; it never talks to disk
+formats or endpoints, and nothing here touches local session
+transcripts.
 
-The API key comes from OPENROUTER_API_KEY or from
-~/.config/omarchy/agents/openrouter.json ({"apiKey": "sk-or-..."}), so
-timers without a login shell environment can still probe the account.
+The management key comes from OPENROUTER_MANAGEMENT_KEY or from
+~/.config/omarchy/agents/openrouter.json ({"managementKey":
+"sk-or-..."}), so timers without a login shell environment can still
+probe the account. A regular inference key is not used: management
+keys cover every endpoint this collector queries.
 """
 
 from __future__ import annotations
@@ -35,7 +39,7 @@ from typing import Any
 
 AGENT_ID = "openrouter"
 AGENT_NAME = "OpenRouter"
-AUTH_HELP = "Set OPENROUTER_API_KEY or add apiKey to ~/.config/omarchy/agents/openrouter.json."
+AUTH_HELP = "Create a management key at https://openrouter.ai/settings/management-keys, then set OPENROUTER_MANAGEMENT_KEY or add managementKey to ~/.config/omarchy/agents/openrouter.json."
 API_BASE_URL = "https://openrouter.ai/api/v1"
 PROBE_MIN_INTERVAL_SECONDS = 15
 ACTIVITY_CACHE_SECONDS = 300
@@ -69,11 +73,6 @@ def _deadline_expired(_signum, _frame):
 def clean_text(value: Any, limit: int = 256) -> str:
   text = str(value or "")
   return "".join(char for char in text if char >= " " and char != "\x7f")[:limit]
-
-
-def safe_data_key(value: Any, fallback: str = "other") -> str:
-  key = clean_text(value, MAX_MODEL_NAME) or fallback
-  return fallback if key in MAGIC_OBJECT_KEYS else key
 
 
 def _validate_dir(fd: int, *, private: bool = False) -> None:
@@ -127,64 +126,6 @@ def open_owned_dir(path: Path, *, create: bool = False, private: bool = False) -
   except Exception:
     os.close(fd)
     raise
-
-
-def _validate_transcript_dir(fd: int) -> None:
-  info = os.fstat(fd)
-  if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
-      or info.st_mode & 0o022):
-    raise OSError("unsafe transcript directory")
-
-
-def iter_transcript_files(root: Path, deadline: float, budget: dict[str, int]):
-  """Yield verified transcript leaf fds from a held, no-follow directory tree."""
-  try:
-    root_fd = open_owned_dir(root)
-    _validate_transcript_dir(root_fd)
-  except OSError:
-    return
-
-  def walk(directory_fd: int, display_path: str, depth: int):
-    if (depth > 16 or time.monotonic() >= deadline
-        or budget["directories"] >= MAX_TRANSCRIPT_DIRS):
-      return
-    budget["directories"] += 1
-    with os.scandir(directory_fd) as entries:
-      for entry in entries:
-        if (time.monotonic() >= deadline
-            or budget["entries"] >= MAX_TRANSCRIPT_ENTRIES):
-          break
-        budget["entries"] += 1
-        name = entry.name
-        if name in (".", ".."):
-          continue
-        try:
-          info = entry.stat(follow_symlinks=False)
-          if stat.S_ISDIR(info.st_mode):
-            child_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=directory_fd)
-            try:
-              child_info = os.fstat(child_fd)
-              _validate_transcript_dir(child_fd)
-              if (child_info.st_dev, child_info.st_ino) != (info.st_dev, info.st_ino):
-                raise OSError("transcript directory changed during traversal")
-              yield from walk(child_fd, f"{display_path}/{name}", depth + 1)
-            finally:
-              os.close(child_fd)
-          elif name.endswith(".jsonl") and stat.S_ISREG(info.st_mode):
-            leaf_fd = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
-            leaf_info = os.fstat(leaf_fd)
-            if (not stat.S_ISREG(leaf_info.st_mode) or leaf_info.st_uid != os.getuid()
-                or (leaf_info.st_dev, leaf_info.st_ino) != (info.st_dev, info.st_ino)):
-              os.close(leaf_fd)
-              continue
-            yield leaf_fd, leaf_info, f"{display_path}/{name}"
-        except OSError:
-          continue
-
-  try:
-    yield from walk(root_fd, str(root), 0)
-  finally:
-    os.close(root_fd)
 
 
 def read_private_json(path: Path, limit: int = MAX_PRIVATE_FILE_BYTES) -> dict[str, Any] | None:
@@ -244,34 +185,6 @@ def local_date_string() -> str:
   return date_string(dt.datetime.now().date())
 
 
-def local_date_from_timestamp(value: Any) -> str:
-  if value is None:
-    return local_date_string()
-
-  if isinstance(value, (int, float)):
-    try:
-      seconds = float(value) / 1000.0 if float(value) > 10_000_000_000 else float(value)
-      return date_string(dt.datetime.fromtimestamp(seconds).date())
-    except Exception:
-      return local_date_string()
-
-  raw = str(value).strip()
-  if not raw:
-    return local_date_string()
-  try:
-    parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    return date_string(parsed.astimezone().date())
-  except Exception:
-    return raw[:10] if len(raw) >= 10 else local_date_string()
-
-
-def usage_token(usage: dict[str, Any], *keys: str) -> int:
-  for key in keys:
-    if key in usage:
-      return number(usage.get(key))
-  return 0
-
-
 def number(value: Any) -> int:
   try:
     return max(0, round(float(value or 0)))
@@ -294,19 +207,6 @@ def ratio(value: Any) -> float:
   if n > 1.0:
     n = n / 100.0
   return max(0.0, min(1.0, n))
-
-
-def empty_bucket() -> dict[str, Any]:
-  return {
-    "inputTokens": 0,
-    "outputTokens": 0,
-    "cacheReadInputTokens": 0,
-    "cacheCreationInputTokens": 0,
-    # pi rates every message at the provider's price sheet; carrying the
-    # dollars beside the tokens lets the panel chart spend instead of
-    # volume. Collectors without rated costs simply omit the field.
-    "cost": 0.0,
-  }
 
 
 def read_fresh_json(path: Path, max_age_seconds: float) -> dict[str, Any] | None:
@@ -359,161 +259,6 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     os.close(directory_fd)
 
 
-# ---------------------------------------------------------------- sessions
-#
-# pi and omp record per-message provider, model, token usage, and rated
-# cost in their session transcripts. Only messages whose provider is
-# OpenRouter count here; the same sessions may also feed other collectors
-# (the Claude collector claims the anthropic-provider messages), so the
-# split keeps every token attributed exactly once.
-
-
-def scan_pi_usage(max_age_seconds: float) -> dict[str, Any]:
-  roots = [
-    Path.home() / ".pi" / "agent" / "sessions",
-    Path.home() / ".omp" / "agent" / "sessions",
-  ]
-  cache_file = cache_root() / "openrouter-pi-sessions.json"
-  cached = read_fresh_json(cache_file, max_age_seconds)
-  if cached is not None and isinstance(cached.get("stats"), dict):
-    return cached["stats"]
-
-  today = local_date_string()
-  recent_dates = recent_date_strings()
-  recent = {day: {"date": day, "messageCount": 0, "prompts": 0, "cost": 0.0} for day in recent_dates}
-  sessions: set[str] = set()
-  active_days: set[str] = set()
-  today_sessions: set[str] = set()
-  today_tokens: dict[str, int] = {}
-  usage_by_model: dict[str, dict[str, int]] = {}
-  seen: set[str] = set()
-  prompts = 0
-  today_prompt_count = 0
-  today_token_total = 0
-  today_cost = 0.0
-  scan_started = time.monotonic()
-  scanned_files = 0
-  scanned_bytes = 0
-  oldest_allowed = time.time() - TRANSCRIPT_MAX_AGE_DAYS * 86400
-  scan_deadline = scan_started + SCAN_DEADLINE_SECONDS
-  traversal_budget = {"directories": 0, "entries": 0}
-
-  for root in roots:
-    files = iter_transcript_files(root, scan_deadline, traversal_budget)
-    for fd, info, session_path in files:
-      if scanned_files >= MAX_TRANSCRIPT_FILES or scanned_bytes >= MAX_SCAN_BYTES or time.monotonic() - scan_started >= SCAN_DEADLINE_SECONDS:
-        os.close(fd)
-        files.close()
-        break
-      try:
-        if info.st_mtime < oldest_allowed or info.st_size > MAX_TRANSCRIPT_BYTES:
-          os.close(fd)
-          continue
-        scanned_files += 1
-        file_bytes = 0
-        with os.fdopen(fd, "rb", closefd=True) as raw_handle:
-          for line_number in range(1, 1_000_001):
-            if time.monotonic() - scan_started >= SCAN_DEADLINE_SECONDS:
-              break
-            raw_line = raw_handle.readline(MAX_LINE_BYTES + 1)
-            if not raw_line:
-              break
-            file_bytes += len(raw_line)
-            scanned_bytes += len(raw_line)
-            if len(raw_line) > MAX_LINE_BYTES or file_bytes > MAX_TRANSCRIPT_BYTES or scanned_bytes > MAX_SCAN_BYTES:
-              break
-            line = raw_line.decode("utf-8", errors="replace")
-            if '"usage"' not in line or '"assistant"' not in line:
-              continue
-            try:
-              entry = json.loads(line)
-              message = entry.get("message") if isinstance(entry.get("message"), dict) else {}
-              if entry.get("type") != "message" or message.get("role") != "assistant":
-                continue
-              if str(message.get("provider") or "") != "openrouter":
-                continue
-              unique_key = f"{session_path}:{entry.get('id') or line_number}"
-              if unique_key in seen:
-                continue
-              seen.add(unique_key)
-              usage = message.get("usage") or {}
-              input_tokens = usage_token(usage, "input", "inputTokens")
-              output_tokens = usage_token(usage, "output", "outputTokens")
-              cache_read = usage_token(usage, "cacheRead", "cache_read_input_tokens")
-              cache_write = usage_token(usage, "cacheWrite", "cache_creation_input_tokens")
-              total = input_tokens + output_tokens + cache_read + cache_write
-              if total <= 0:
-                total = number(usage.get("totalTokens"))
-                input_tokens = total
-              if total <= 0:
-                continue
-              model = safe_data_key(message.get("model") or "openrouter", "openrouter")
-              day = local_date_from_timestamp(entry.get("timestamp") or message.get("timestamp"))
-              cost = money((usage.get("cost") or {}).get("total") if isinstance(usage.get("cost"), dict) else usage.get("cost"))
-            except Exception:
-              continue
-
-            session_key = session_path
-            sessions.add(session_key)
-            active_days.add(day)
-            prompts += 1
-            if model not in usage_by_model and len(usage_by_model) >= MAX_MODELS:
-              model = "other"
-            bucket = usage_by_model.setdefault(model, empty_bucket())
-            bucket["inputTokens"] += input_tokens
-            bucket["outputTokens"] += output_tokens
-            bucket["cacheReadInputTokens"] += cache_read
-            bucket["cacheCreationInputTokens"] += cache_write
-            bucket["cost"] = round(bucket["cost"] + cost, 6)
-            if day in recent:
-              recent[day]["messageCount"] += total
-              recent[day]["prompts"] += 1
-              recent[day]["cost"] = round(recent[day]["cost"] + cost, 6)
-            if day == today:
-              today_prompt_count += 1
-              today_sessions.add(session_key)
-              today_token_total += total
-              today_tokens[model] = today_tokens.get(model, 0) + total
-              today_cost += cost
-      except OSError:
-        continue
-
-  stats = {
-    "hasCostStats": True,
-    "todayPrompts": today_prompt_count,
-    "todaySessions": len(today_sessions),
-    "todayTotalTokens": today_token_total,
-    "todayTokensByModel": today_tokens,
-    "recentDays": [recent[day] for day in recent_dates],
-    "modelUsage": usage_by_model,
-    "totalPrompts": prompts,
-    "totalSessions": len(sessions),
-    "activeDays": len(active_days),
-    "activeDates": sorted(active_days),
-    "todayLocalCost": round(today_cost, 6),
-  }
-  write_json(cache_file, {"stats": stats})
-  return stats
-
-
-def cached_scan(max_age_seconds: float) -> dict[str, Any]:
-  directory_fd = open_owned_dir(cache_root(), create=True, private=True)
-  try:
-    fd = os.open("openrouter-pi-sessions.lock", os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=directory_fd)
-    try:
-      info = os.fstat(fd)
-      if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
-        raise OSError("unsafe cache lock")
-      if stat.S_IMODE(info.st_mode) != 0o600:
-        os.fchmod(fd, 0o600)
-      fcntl.flock(fd, fcntl.LOCK_EX)
-      return scan_pi_usage(max_age_seconds)
-    finally:
-      os.close(fd)
-  finally:
-    os.close(directory_fd)
-
-
 # ------------------------------------------------------------------- limits
 #
 # OpenRouter is prepaid, so the account has a balance rather than a plan
@@ -521,18 +266,12 @@ def cached_scan(max_age_seconds: float) -> dict[str, Any]:
 # reports this key's daily, weekly, and monthly spend plus any per-key
 # limit. A per-key limit becomes a percent bar; without one the spend
 # figures travel in usageStatusText and the balance block carries the
-# remaining credit.
+# remaining credit. Both endpoints accept the management key, which is
+# the only credential this collector needs.
 
 
 def read_config() -> dict[str, Any]:
   return read_private_json(config_path(), 16 * 1024) or {}
-
-
-def api_key() -> str:
-  key = clean_text(os.environ.get("OPENROUTER_API_KEY", ""), 512).strip()
-  if key:
-    return key
-  return clean_text(read_config().get("apiKey"), 512).strip()
 
 
 def management_key() -> str:
@@ -587,8 +326,8 @@ def probe_account(key: str) -> dict[str, Any]:
     key_info = api_request("/key", key)
   except urllib.error.HTTPError as error:
     if error.code in (401, 403):
-      return {"ok": False, "helpText": "OpenRouter rejected the API key. " + AUTH_HELP}
-    return {"ok": False, "helpText": f"OpenRouter's API returned status {error.code}. Local pi stats are still shown."}
+      return {"ok": False, "helpText": "OpenRouter rejected the management key. " + AUTH_HELP}
+    return {"ok": False, "helpText": f"OpenRouter's API returned status {error.code}."}
   except Exception:
     # A transport failure reached no server at all — no route, no DNS. Any
     # real answer, including an error status, is a server we should stop
@@ -596,7 +335,7 @@ def probe_account(key: str) -> dict[str, Any]:
     return {
       "ok": False,
       "transport": True,
-      "helpText": "Couldn't reach OpenRouter. Retrying shortly. Local pi stats are still shown.",
+      "helpText": "Couldn't reach OpenRouter. Retrying shortly.",
     }
 
   # /credits reports lifetime purchases and lifetime usage. Presenting those
@@ -644,9 +383,9 @@ def probe_account(key: str) -> dict[str, Any]:
 def collect_account(force: bool) -> dict[str, Any]:
   result: dict[str, Any] = {"limits": [], "usageStatusText": "", "authHelpText": "", "tierLabel": ""}
 
-  key = api_key()
+  key = management_key()
   if key == "":
-    result["usageStatusText"] = "Waiting for auth"
+    result["usageStatusText"] = "Waiting for management key"
     result["authHelpText"] = AUTH_HELP
     return result
 
@@ -719,28 +458,6 @@ def ranked_tokens(rows: list[dict[str, Any]], name_key: str, limit: int) -> list
   return items[:limit]
 
 
-def ranked_local_models(usage_by_model: Any, limit: int) -> list[dict[str, Any]]:
-  items: list[dict[str, Any]] = []
-  if not isinstance(usage_by_model, dict):
-    return items
-  for model_id, bucket in usage_by_model.items():
-    if not isinstance(bucket, dict):
-      continue
-    tokens = (
-      number(bucket.get("inputTokens"))
-      + number(bucket.get("outputTokens"))
-      + number(bucket.get("cacheReadInputTokens"))
-      + number(bucket.get("cacheCreationInputTokens"))
-    )
-    items.append({
-      "name": clean_text(model_id, MAX_MODEL_NAME),
-      "tokens": tokens,
-      "cost": money(bucket.get("cost")),
-    })
-  items.sort(key=lambda item: item["tokens"], reverse=True)
-  return items[:limit]
-
-
 def period_time_range(period: str) -> dict[str, str]:
   days = PERIOD_DAYS.get(period, 30)
   end = dt.datetime.now(dt.timezone.utc)
@@ -748,41 +465,6 @@ def period_time_range(period: str) -> dict[str, str]:
   return {
     "start": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
     "end": end.strftime("%Y-%m-%dT%H:%M:%SZ"),
-  }
-
-
-def local_activity(stats: dict[str, Any], period: str) -> dict[str, Any]:
-  recent = stats.get("recentDays") or []
-  spend = 0.0
-  requests = 0
-  tokens = 0
-  for day in recent:
-    if not isinstance(day, dict):
-      continue
-    spend += money(day.get("cost"))
-    requests += number(day.get("prompts"))
-    tokens += number(day.get("messageCount"))
-  cache_read = 0
-  input_tokens = 0
-  usage_by_model = stats.get("modelUsage") or {}
-  if isinstance(usage_by_model, dict):
-    for bucket in usage_by_model.values():
-      if not isinstance(bucket, dict):
-        continue
-      cache_read += number(bucket.get("cacheReadInputTokens"))
-      input_tokens += number(bucket.get("inputTokens"))
-  denom = cache_read + input_tokens
-  return {
-    "period": period,
-    "source": "local",
-    "spend": round(spend, 6),
-    "requests": requests,
-    "tokens": tokens,
-    "cacheHitRate": (cache_read / denom) if denom > 0 else 0.0,
-    "topModels": ranked_local_models(usage_by_model, 3),
-    "topApps": [],
-    "topKeys": [],
-    "needsManagementKey": True,
   }
 
 
@@ -892,7 +574,7 @@ def probe_daily(key: str, dates: list[str]) -> dict[str, Any]:
   return {"ok": True, "byDay": by_day}
 
 
-def collect_daily(force: bool, stats: dict[str, Any]) -> dict[str, Any]:
+def collect_daily(force: bool) -> dict[str, Any]:
   cache_file = cache_root() / "openrouter-daily.json"
   max_age = 0 if force else ACTIVITY_CACHE_SECONDS
   by_day: Any = None
@@ -971,10 +653,10 @@ def collect_daily(force: bool, stats: dict[str, Any]) -> dict[str, Any]:
   }
 
 
-def collect_activity(period: str, force: bool, limits_only: bool, stats: dict[str, Any]):
+def collect_activity(period: str, force: bool, limits_only: bool) -> dict[str, Any]:
   if period not in VALID_PERIODS:
     period = "1mo"
-  fallback = local_activity(stats, period)
+  fallback: dict[str, Any] = {"limits": [], "usageStatusText": "", "authHelpText": "", "needsManagementKey": True}
   cache_file = cache_root() / f"openrouter-activity-{period}.json"
   max_age = 0 if force else (900 if limits_only else ACTIVITY_CACHE_SECONDS)
   if max_age > 0:
@@ -994,8 +676,6 @@ def collect_activity(period: str, force: bool, limits_only: bool, stats: dict[st
   stale = read_fresh_json(cache_file, float("inf")) or {}
   if isinstance(stale.get("activity"), dict):
     return stale["activity"]
-  if probe.get("needsManagementKey"):
-    fallback["needsManagementKey"] = True
   return fallback
 
 
@@ -1006,35 +686,29 @@ def main() -> int:
   signal.signal(signal.SIGALRM, _deadline_expired)
   signal.alarm(COLLECT_DEADLINE_SECONDS)
   parser = argparse.ArgumentParser()
-  parser.add_argument("--force", action="store_true", help="rescan sessions and re-probe the account, ignoring caches")
-  parser.add_argument("--limits-only", action="store_true", help="reuse any recent session scan; only the account probe must be fresh")
+  parser.add_argument("--force", action="store_true", help="re-probe the account and refresh all caches")
+  parser.add_argument("--limits-only", action="store_true", help="serve the cached Details activity; only the account probe must be fresh")
   parser.add_argument("--period", choices=list(VALID_PERIODS), default="1mo", help="activity window for the Details section")
-  parser.add_argument("--cache-seconds", type=float, default=20)
   args = parser.parse_args()
 
-  scan_age = 0 if args.force else (900 if args.limits_only else args.cache_seconds)
-  stats = cached_scan(scan_age)
   account = collect_account(args.force)
-  activity = collect_activity(args.period, args.force, args.limits_only, stats)
-  daily = collect_daily(args.force, stats)
+  activity = collect_activity(args.period, args.force, args.limits_only)
+  daily = collect_daily(args.force)
 
   record = {
     "schemaVersion": 1,
     "id": AGENT_ID,
     "name": AGENT_NAME,
     "updatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
-    "ready": number(stats.get("totalPrompts")) > 0 or bool(account.get("balance")),
-    "hasLocalStats": True,
-    # The balance and spend figures are account-global, not machine-local:
-    # every synced device reports the same truth, so aggregation must not
-    # sum them. Session stats are local, hence hasLocalStats above.
+    "ready": bool(account.get("balance")),
+    # Everything in the record is account-global: every device reporting on
+    # the same account shows the same truth, so aggregation must not sum it.
     "scope": "account",
     "tierLabel": account.get("tierLabel") or "",
     "usageStatusText": account.get("usageStatusText") or "",
     "authHelpText": account.get("authHelpText") or "",
     "limits": account.get("limits") or [],
     "activity": activity,
-    "dailyScope": daily["scope"],
   }
   if daily.get("keys"):
     record["dailyKeys"] = daily["keys"]
@@ -1044,7 +718,6 @@ def main() -> int:
     record["balance"] = account["balance"]
   if account.get("retryAdvised"):
     record["retryAdvised"] = True
-  record.update(stats)
   encoded = json.dumps(record, separators=(",", ":"), sort_keys=True)
   if len(encoded.encode("utf-8")) > MAX_RECORD_BYTES:
     raise ValueError("collector record exceeds output limit")

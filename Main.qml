@@ -157,13 +157,9 @@ Item {
       var keys = Object.keys(value)
       var topLevel = {
         schemaVersion: true, id: true, name: true, updatedAt: true, ready: true,
-        hasLocalStats: true, scope: true, tierLabel: true, usageStatusText: true,
+        scope: true, tierLabel: true, usageStatusText: true,
         authHelpText: true, limits: true, activity: true, balance: true,
-        retryAdvised: true, hasCostStats: true, todayPrompts: true,
-        todaySessions: true, todayTotalTokens: true, todayTokensByModel: true,
-        recentDays: true, modelUsage: true, totalPrompts: true,
-        totalSessions: true, activeDays: true, activeDates: true,
-        todayLocalCost: true, dailyScope: true, dailyKeys: true, dailyDays: true
+        retryAdvised: true, dailyKeys: true, dailyDays: true
       }
       for (var j = 0; j < keys.length && j < 128; j++) {
         var key = String(keys[j]).slice(0, 160)

@@ -23,26 +23,20 @@ Panel {
 
   readonly property var record: usage.record
   readonly property var balance: record ? (record.balance || null) : null
-  // Daily bars prefer the account-wide feed (all keys, all devices) and
-  // fall back to the machine-local scan when no management key is set.
-  readonly property var days: {
-    var daily = record && record.dailyDays
-    if (daily && daily.length > 0) return daily
-    return record ? (record.recentDays || []) : []
-  }
-  readonly property string dailyScope: record ? String(record.dailyScope || "local") : "local"
+  // Account-wide daily bars from the Analytics API, colored by the week's
+  // top three keys. The collector emits them only with a management key.
+  readonly property var days: record && Array.isArray(record.dailyDays) ? record.dailyDays : []
   // Top three keys by cost across the whole week, ranked by the collector.
   readonly property var dailyKeys: record && Array.isArray(record.dailyKeys) ? record.dailyKeys : []
   // Bars only break into colored segments when two or more keys were active
   // during the week; a single-key account keeps the plain bar and no legend.
-  readonly property bool keyedBars: dailyScope === "account" && dailyKeys.length > 1
+  readonly property bool keyedBars: dailyKeys.length > 1
   readonly property var keyIndexMap: {
     var map = {}
     for (var i = 0; i < dailyKeys.length; i++)
       map[String((dailyKeys[i] || {}).name || "")] = i
     return map
   }
-  readonly property var models: modelRows(record)
   readonly property var activity: record ? (record.activity || null) : null
   readonly property var topModels: activityModelRows()
   readonly property var topApps: activity && Array.isArray(activity.topApps) ? activity.topApps.slice(0, 3) : []
@@ -137,9 +131,6 @@ Panel {
       : dayName(day.date) + " " + (parsed.getMonth() + 1) + "/" + parsed.getDate()
     var text = label + " · " + formatCost(day.cost)
       + " · " + usage.formatTokenCount(Number(day.messageCount || 0)) + " tokens"
-    if (today && record)
-      text += " · " + Number(record.todayPrompts || 0) + " prompts · "
-        + Number(record.todaySessions || 0) + " sessions"
     if (root.keyedBars && day.keys && day.keys.length > 0) {
       var other = 0
       for (var i = 0; i < day.keys.length; i++) {
@@ -205,29 +196,6 @@ Panel {
     return Math.max(1e-9, peak)
   }
 
-  function modelRows(r) {
-    var usageByModel = r ? (r.modelUsage || {}) : {}
-    var rows = []
-    for (var id in usageByModel) {
-      var bucket = usageByModel[id] || {}
-      var input = Number(bucket.inputTokens || 0)
-      var output = Number(bucket.outputTokens || 0)
-      var cacheRead = Number(bucket.cacheReadInputTokens || 0)
-      var cacheWrite = Number(bucket.cacheCreationInputTokens || 0)
-      rows.push({
-        name: usage.friendlyModelName(id),
-        total: input + output + cacheRead + cacheWrite,
-        cost: Number(bucket.cost || 0),
-        input: input,
-        output: output,
-        cacheRead: cacheRead,
-        cacheWrite: cacheWrite
-      })
-    }
-    rows.sort(function(a, b) { return b.cost - a.cost })
-    return rows.slice(0, 4)
-  }
-
   function activityModelRows() {
     var list = activity && activity.topModels ? activity.topModels : []
     var rows = []
@@ -240,14 +208,6 @@ Panel {
       })
     }
     return rows
-  }
-
-  function modelTooltip(row) {
-    if (!row) return ""
-    return usage.formatTokenCount(row.total) + " tokens · in " + usage.formatTokenCount(row.input)
-      + " · out " + usage.formatTokenCount(row.output)
-      + " · cache read " + usage.formatTokenCount(row.cacheRead)
-      + " · cache write " + usage.formatTokenCount(row.cacheWrite)
   }
 
   // OpenRouter's brand palette pairs chartreuse with dark surfaces and
@@ -273,10 +233,8 @@ Panel {
 
   function activityHint() {
     if (!activity) return ""
-    if (activity.source === "local")
-      return "Local last 7 days · add managementKey to ~/.config/omarchy/agents/openrouter.json for Top Apps and Keys."
     if (activity.needsManagementKey)
-      return "Add managementKey to ~/.config/omarchy/agents/openrouter.json for Top Apps and Keys."
+      return "Add managementKey to ~/.config/omarchy/agents/openrouter.json for spend cards and ranked lists."
     return ""
   }
 
@@ -660,7 +618,7 @@ Panel {
 
             PanelSectionHeader {
               width: parent.width
-              text: root.dailyScope === "account" ? "SPEND BY DAY · ACCOUNT" : "SPEND BY DAY"
+              text: "SPEND BY DAY"
               foreground: root.foreground
               fontFamily: root.fontFamily
             }
@@ -1175,76 +1133,6 @@ Panel {
     PanelToolTip {
       visible: dayHover.containsMouse
       text: root.dayTooltip(dayRow.day, dayRow.today)
-      fontFamily: root.fontFamily
-    }
-  }
-
-  // Model rows read as a table: the share bar fills the row behind the label
-  // instead of stacking under it, which keeps the whole dashboard on one screen.
-  component ModelRow: Item {
-    id: modelRow
-    property var row: null
-    property real share: 0
-
-    implicitHeight: modelName.implicitHeight + Style.spacing.lg
-
-    Rectangle {
-      anchors.fill: parent
-      radius: Style.cornerRadius
-      color: root.alpha(root.foreground, 0.05)
-    }
-
-    Rectangle {
-      anchors.left: parent.left
-      anchors.top: parent.top
-      anchors.bottom: parent.bottom
-      width: parent.width * root.clamp(modelRow.share, 0, 1)
-      radius: Style.cornerRadius
-      color: root.alpha(root.foreground, 0.14)
-
-      Behavior on width {
-        NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
-      }
-    }
-
-    Text {
-      textFormat: Text.PlainText
-      id: modelName
-      text: modelRow.row ? modelRow.row.name : ""
-      color: root.foreground
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.bodySmall
-      elide: Text.ElideRight
-      anchors.left: parent.left
-      anchors.leftMargin: Style.space(8)
-      anchors.right: modelCost.left
-      anchors.rightMargin: Style.space(8)
-      anchors.verticalCenter: parent.verticalCenter
-    }
-
-    Text {
-      textFormat: Text.PlainText
-      id: modelCost
-      text: modelRow.row ? root.formatCost(modelRow.row.cost) : ""
-      color: root.dim
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.bodySmall
-      font.bold: true
-      anchors.right: parent.right
-      anchors.rightMargin: Style.space(8)
-      anchors.verticalCenter: parent.verticalCenter
-    }
-
-    MouseArea {
-      id: modelHover
-      anchors.fill: parent
-      hoverEnabled: true
-      acceptedButtons: Qt.NoButton
-    }
-
-    PanelToolTip {
-      visible: modelHover.containsMouse
-      text: root.modelTooltip(modelRow.row)
       fontFamily: root.fontFamily
     }
   }

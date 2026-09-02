@@ -1,22 +1,23 @@
 # OpenRouter Usage — Omarchy bar widget
 
-Live OpenRouter credits and spend in the Omarchy (Quattro / 4.x) bar.
+Live OpenRouter account usage in the Omarchy (Quattro / 4.x) bar, powered entirely by OpenRouter's REST API and a **management key**. The panel shows your prepaid balance, a 7-day spend chart broken down and colored by the API keys that spent it, and Details cards with top models, apps, and keys.
 
 ![OpenRouter Usage panel](assets/screenshot.png)
 
-- **Bar** — OpenRouter mark plus remaining prepaid credit
-- **Header** — remaining balance on the right of OpenRouter / prepaid
+- **Bar** — OpenRouter mark plus remaining prepaid credit (turns red at < 10% of your declared top-up)
+- **Header** — remaining balance, tier
 - **Shortcuts** — Add Credits, Full Activity, Manage Keys, Browse Models
-- **Spend by day** — last 7 days of rated cost, account-wide; with a management key the bars are colored by the week's top three API keys (rest folds into Other) with a ranked legend
-- **Details** — sticky expand: spend, requests, tokens, cache hit, top models, top apps, top keys
+- **Spend by day** — last 7 days of account-wide spend; each bar is segmented by the week's **top three API keys** (consistent colors across days), with everything else folded into **Other** and a ranked legend underneath
+- **Details** — spend, requests, tokens, cache hit rate, top models, top apps, top keys
 
-Derived from [ssobhani/omarchy-openrouter-usage](https://github.com/sepehr500/omarchy-openrouter-usage) (MIT). This plugin does **not** replace the stock `omarchy.agents` widget.
+Derived from [calmasacow/omarchy-openrouter-usage-plus](https://github.com/calmasacow/omarchy-openrouter-usage-plus) (MIT, itself derived from sepehr500's widget).
 
 ## Requirements
 
 - Omarchy 4.x (Quattro)
-- An OpenRouter API key
-- Optional: [management key](https://openrouter.ai/settings/management-keys) for the account-wide daily chart (key-colored bars), Top Apps and Top Keys
+- **A management key — this is mandatory.** Create one at [openrouter.ai/settings/management-keys](https://openrouter.ai/settings/management-keys) and give it read access.
+
+> **This plugin does not work with just a regular API key.** Unlike the plugin it derives from, it no longer reads local pi/omp session transcripts and no longer uses an inference key for the balance: every value it shows — balance, daily spend, per-key breakdowns, ranked lists — comes from endpoints that either require the management key (analytics) or are simplest to serve with it. A regular inference key (`sk-or-v1-…` from /settings/keys) is **not** needed and not read.
 
 ## Install
 
@@ -24,50 +25,51 @@ Derived from [ssobhani/omarchy-openrouter-usage](https://github.com/sepehr500/om
 omarchy plugin add https://github.com/titaniumcoder/omarchy-openrouter-usage.git --enable
 ```
 
-Then copy the example config and put your real keys in it. The checked-in file is a template only — never commit live keys.
+Then put your management key in place:
 
 ```bash
 mkdir -p ~/.config/omarchy/agents
 cp examples/config/omarchy/agents/openrouter.json ~/.config/omarchy/agents/openrouter.json
-chmod 600 ~/.config/omarchy/agents/openrouter.json
+chmod 600 ~/.config/omarchy/agents/openrouter.json  # required — the collector refuses world-readable configs
+$EDITOR ~/.config/omarchy/agents/openrouter.json
 ```
 
 Example (`examples/config/omarchy/agents/openrouter.json`):
 
 ```json
 {
-  "apiKey": "sk-or-v1-REPLACE_WITH_YOUR_INFERENCE_KEY",
-  "managementKey": "sk-or-v1-REPLACE_WITH_YOUR_MANAGEMENT_KEY"
+  "managementKey": "sk-or-v1-REPLACE_WITH_YOUR_MANAGEMENT_KEY",
+  "fundedAmount": 350
 }
 ```
 
-- `apiKey` — inference key from [openrouter.ai/settings/keys](https://openrouter.ai/settings/keys) (balance, spend). You can also export `OPENROUTER_API_KEY`.
-- `managementKey` — read-only [management key](https://openrouter.ai/settings/management-keys) for Top Models / Apps / Keys. Analytics rejects inference keys (403). You can also export `OPENROUTER_MANAGEMENT_KEY`.
+- `managementKey` (required) — read-only [management key](https://openrouter.ai/settings/management-keys). Also accepted from the `OPENROUTER_MANAGEMENT_KEY` environment variable.
+- `fundedAmount` (optional) — your current top-up in USD. OpenRouter only reports the *remaining* balance, so without this the number is shown as-is; with it, the bar tracks the drained fraction and turns red at 10%.
 
-The widget appears once the first scan finds a usable account or local usage.
+## What it shows
 
-## Optional: Details from the Activity API
+| Section | Source | Notes |
+|---|---|---|
+| Balance / remaining | `/credits` | lifetime purchases minus lifetime usage |
+| Key limit bar | `/key` | only if a per-key limit is set on the key |
+| Spend by day (7 days) | `/analytics/query`, one query per day | account-wide, all keys, all devices; local-calendar day windows converted to UTC; today's partial day included |
+| Key-colored bars + legend | `/analytics/query` grouped by `api_key_id` | ranked by cost across the whole week; top 3 get fixed hues, the rest is Other; a single-key account renders plain |
+| Details cards & ranked lists | `/analytics/query` | 7d / 1mo / 3mo window, switchable in the panel |
 
-Without `managementKey`, Details still shows cards from local pi/omp sessions when those exist; ranked lists stay hidden.
-
-`d` toggles Details. Expand/collapse is remembered in bar settings.
-
-## Optional: budget gauge
-
-OpenRouter only reports lifetime purchases and usage. For a drain meter, set `fundedAmount` to your current top-up:
-
-```json
-{"apiKey": "sk-or-v1-...", "fundedAmount": 1000}
-```
+All figures are account-global — the same panel on every machine synced to the same account shows the same numbers. Data is cached for ~5 minutes (right-click the bar mark, or press `r` in the panel, to force a refresh); a failed API probe serves the last good data instead of flickering.
 
 ## Settings
 
-Right-click the bar mark to refresh.
-
 | Setting | Default | Meaning |
 |---|---|---|
-| `refreshIntervalSec` | 300 | How often the collector re-probes the account |
-| `detailsExpanded` | false | Keep Details expanded across panel closes |
+| `refreshIntervalSec` | 300 | How often the collector re-probes OpenRouter |
+| `detailsExpanded` | false | Keep the Details section expanded across panel closes |
+
+The panel also reacts to keyboard shortcuts when open: `r` refreshes, `d` toggles Details.
+
+## Management key scope
+
+The collector only *reads* from the OpenRouter API — it never creates keys, spends credit, or changes settings. A read-only management key is sufficient and recommended. The key file must be `chmod 600`; the collector silently ignores world-readable configs.
 
 ## Remove
 
@@ -80,6 +82,7 @@ Optionally delete `~/.config/omarchy/agents/openrouter.json` and `~/.cache/omarc
 ## Credits
 
 - Original widget: sepehr500 / ssobhani
+- Account-wide daily chart with per-key coloring: this fork
 - OpenRouter "OR" glyph from OpenRouter brand assets (openrouter.ai/brand/v2). OpenRouter is a trademark of its owner; this project is not affiliated.
 
 ## License
