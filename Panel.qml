@@ -105,6 +105,28 @@ Panel {
     return text
   }
 
+  // Gauge ramp: calm foreground below half the cap, then a steady blend
+  // toward the urgent red as a key approaches its budget.
+  function drainColor(drain) {
+    var t = clamp((Number(drain || 0) - 0.5) / 0.5, 0, 1)
+    return Qt.rgba(
+      foreground.r + (urgent.r - foreground.r) * t,
+      foreground.g + (urgent.g - foreground.g) * t,
+      foreground.b + (urgent.b - foreground.b) * t,
+      1)
+  }
+
+  // Reset cadence as one trailing letter: M(onthly), W(eekly), D(aily),
+  // N(ever). Empty for keys without a cadence.
+  function resetLetter(reset) {
+    var r = String(reset || "").toLowerCase()
+    if (r === "monthly") return "M"
+    if (r === "weekly") return "W"
+    if (r === "daily") return "D"
+    if (r === "never" || r === "none") return "N"
+    return ""
+  }
+
   // ---------------------------------------------------------------- content
 
   function heroMeta() {
@@ -629,12 +651,14 @@ Panel {
 
             PanelSectionHeader {
               width: parent.width
-              text: "SPEND BY DAY"
+              text: "USAGE THIS WEEK"
               foreground: root.foreground
               fontFamily: root.fontFamily
             }
 
             // Week-wide key ranking: the same three keys the bars color.
+            // Swatches sit at the day bars' left edge and amounts right-align
+            // with the day amounts, so the block reads as one table.
             Column {
               visible: root.keyedBars
               width: parent.width
@@ -644,39 +668,51 @@ Panel {
                 id: keyLegend
                 model: root.dailyKeys.length + (root.weekOtherCost() > 0 ? 1 : 0)
 
-                delegate: Row {
+                delegate: Item {
+                  id: legendRow
                   required property int index
                   readonly property bool isOther: index >= root.dailyKeys.length
                   readonly property var entry: isOther ? null : (root.dailyKeys[index] || {})
-                  spacing: Style.space(6)
+                  width: spendSection.width
+                  height: Style.space(14)
 
                   Rectangle {
+                    id: legendSwatch
+                    x: Style.space(60)
                     width: Style.space(8)
                     height: Style.space(8)
                     radius: 2
                     anchors.verticalCenter: parent.verticalCenter
-                    color: isOther ? root.alpha(root.foreground, 0.55) : root.keyColor(index)
+                    color: legendRow.isOther ? root.alpha(root.foreground, 0.55) : root.keyColor(legendRow.index)
                   }
 
                   Text {
                     textFormat: Text.PlainText
-                    width: root.weekOtherCost() > 0 ? spendSection.width - Style.space(96) : spendSection.width - Style.space(60)
-                    text: isOther ? "Other" : (index + 1) + ". " + String(entry.name || "")
+                    anchors.left: legendSwatch.right
+                    anchors.leftMargin: Style.space(6)
+                    anchors.right: legendRow.right
+                    anchors.rightMargin: Style.space(52)
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: legendRow.isOther ? "Other" : String(legendRow.entry.name || "")
                     color: root.dim
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
                     elide: Text.ElideRight
-                    anchors.verticalCenter: parent.verticalCenter
                   }
 
                   Text {
                     textFormat: Text.PlainText
-                    text: isOther ? root.formatCost(root.weekOtherCost()) : root.formatCost(entry.cost)
+                    anchors.right: legendRow.right
+                    width: Style.space(52)
+                    anchors.verticalCenter: parent.verticalCenter
+                    horizontalAlignment: Text.AlignRight
+                    text: legendRow.isOther
+                      ? root.formatCost(root.weekOtherCost())
+                      : root.formatCost(legendRow.entry.cost)
                     color: root.dim
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
                     font.bold: true
-                    anchors.verticalCenter: parent.verticalCenter
                   }
                 }
               }
@@ -697,38 +733,7 @@ Panel {
             }
           }
 
-          // ---------- Key budgets (per-key spend caps) ----------
-          PanelSeparator {
-            visible: budgetsSection.visible
-            foreground: root.foreground
-          }
-
-          Column {
-            id: budgetsSection
-            visible: root.keyBudgets.length > 0
-            width: parent.width
-            spacing: Style.spacing.md
-
-            PanelSectionHeader {
-              width: parent.width
-              text: "KEY BUDGETS"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            Repeater {
-              model: root.keyBudgets
-
-              BudgetRow {
-                required property var modelData
-
-                width: budgetsSection.width
-                budget: modelData
-              }
-            }
-          }
-
-          // ---------- Details (cards, top models, apps, keys) ----------
+          // ---------- Details (cards, key budgets, top models, apps, keys) ----------
           PanelSeparator {
             visible: detailsSection.visible
             foreground: root.foreground
@@ -864,6 +869,31 @@ Panel {
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
                 wrapMode: Text.WordWrap
+              }
+
+              Column {
+                id: budgetsSection
+                visible: root.keyBudgets.length > 0
+                width: parent.width
+                spacing: Style.spacing.md
+
+                PanelSectionHeader {
+                  width: parent.width
+                  text: "KEY BUDGETS"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+
+                Repeater {
+                  model: root.keyBudgets
+
+                  BudgetRow {
+                    required property var modelData
+
+                    width: budgetsSection.width
+                    budget: modelData
+                  }
+                }
               }
 
               Column {
@@ -1009,6 +1039,9 @@ Panel {
     id: meter
     property real value: -1
     property bool alarming: false
+    // Optional fill override; alarming still wins so a critical gauge
+    // cannot be painted back to calm by a stale override.
+    property color fillColor: root.foreground
     property real thickness: Math.max(Style.space(4), Math.round(Style.spacing.controlHeight * 0.14))
 
     implicitHeight: thickness
@@ -1026,7 +1059,7 @@ Panel {
       height: meterTrack.height
       radius: meterTrack.radius
       width: meterTrack.width * root.clamp(meter.value, 0, 1)
-      color: meter.alarming ? root.urgent : root.foreground
+      color: meter.alarming ? root.urgent : meter.fillColor
 
       Behavior on width {
         NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
@@ -1053,7 +1086,7 @@ Panel {
       textFormat: Text.PlainText
       id: budgetName
       text: budgetRow.budget ? String(budgetRow.budget.name || "") : ""
-      color: budgetRow.alarming ? root.urgent : (budgetRow.drain > 0 ? root.foreground : root.dim)
+      color: budgetRow.alarming ? root.urgent : root.drainColor(budgetRow.drain)
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
       font.bold: budgetRow.alarming
@@ -1071,6 +1104,7 @@ Panel {
       anchors.verticalCenter: parent.verticalCenter
       value: budgetRow.drain
       alarming: budgetRow.alarming
+      fillColor: root.drainColor(budgetRow.drain)
     }
 
     Text {
@@ -1078,6 +1112,7 @@ Panel {
       id: budgetValue
       text: budgetRow.budget
         ? root.formatMoney(budgetRow.budget.used) + " / " + root.formatMoney(budgetRow.budget.limit)
+          + root.resetLetter(budgetRow.budget.reset)
         : ""
       color: budgetRow.alarming ? root.urgent : root.dim
       font.family: root.fontFamily
