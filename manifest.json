@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "id": "calmasacow.openrouter-usage-plus",
-  "name": "OpenRouter Usage Plus",
-  "version": "1.2.0",
-  "author": "calmasacow",
+  "id": "calmasacow.openrouter-usage-ind",
+  "name": "OpenRouter Usage",
+  "version": "1.0.0",
+  "author": "titaniumcoder",
   "license": "MIT",
   "description": "OpenRouter credits on the Omarchy bar: remaining balance, spend by day, Details with top models/apps/keys, and shortcuts to credits, activity, keys, and models.",
   "kinds": ["bar-widget"],
@@ -12,10 +12,10 @@
     "barWidget": "Panel.qml"
   },
   "barWidget": {
-    "displayName": "OpenRouter Usage Plus",
+    "displayName": "OpenRouter Usage",
     "description": "Bar mark plus remaining credit. Panel: header balance, OpenRouter shortcuts, spend by day, and a sticky Details section for spend, requests, tokens, cache hit, top models, top apps, and top keys.",
     "category": "AI",
-    "aliases": ["openrouter", "openrouter-usage", "openrouter-usage-plus"],
+    "aliases": ["openrouter", "openrouter-usage", "openrouter-usage-ind"],
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
