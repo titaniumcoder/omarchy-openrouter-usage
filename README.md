@@ -7,8 +7,8 @@ Live OpenRouter account usage in the Omarchy (Quattro / 4.x) bar, powered entire
 - **Bar** — OpenRouter mark plus remaining prepaid credit (turns red at < 10% of your declared top-up)
 - **Header** — remaining balance, tier
 - **Shortcuts** — Add Credits, Full Activity, Manage Keys, Browse Models
-- **Usage by day** — last 7 days of account-wide spend; each bar is segmented by the week's **top three API keys** (consistent colors across days), with everything else folded into **Other** and a ranked legend above the chart
-- **Key budgets** — per-key spend caps with drain meters (from OpenRouter's per-key limits), sorted most-drained first; the gauge ramps toward red as a key approaches its cap, and a trailing letter gives the reset cadence (M monthly · W weekly · D daily · N never)
+- **Usage by day** — last 7 days of account-wide spend; each bar is segmented by the week's **top three API keys** (consistent colors across days), everything else in **Other**; hovering a day breaks down its spend per key
+- **Key budgets** — per-key spend caps with drain meters (from OpenRouter's per-key limits), sorted most-drained first; the gauge ramps toward red as a key approaches its cap; hovering shows the remaining amount and reset cadence
 - **Details** — spend, requests, tokens, cache hit rate, top models, top apps, top keys
 
 Derived from [calmasacow/omarchy-openrouter-usage-plus](https://github.com/calmasacow/omarchy-openrouter-usage-plus) (MIT, itself derived from sepehr500's widget).
@@ -54,8 +54,8 @@ Example (`examples/config/omarchy/agents/openrouter.json`):
 | Balance / remaining | `/credits` | lifetime purchases minus lifetime usage |
 | Key limit bar | `/key` | only if a per-key limit is set on the key |
 | Spend by day (7 days) | `/analytics/query`, one query per day | account-wide, all keys, all devices; local-calendar day windows converted to UTC; today's partial day included |
-| Usage by day (bars + top keys legend) | `/analytics/query` grouped by `api_key_id` | ranked by cost across the whole week; top 3 get fixed hues, the rest is Other; a single-key account renders plain |
-| Key budgets | `/keys` | per-key cap (`limit`), current-period draw (`limit - limit_remaining`), and reset cadence; hidden entirely when no key has a cap set |
+| Usage by day (key-colored bars) | `/analytics/query` grouped by `api_key_id` | ranked by cost across the whole week; top 3 get fixed hues, the rest is Other; a single-key account renders plain |
+| Key budgets | `/keys` | per-key cap (`limit`) and current-period draw (`limit - limit_remaining`); reset cadence in the hover tooltip; hidden entirely when no key has a cap set |
 | Details cards & ranked lists | `/analytics/query` | 7d / 1mo / 3mo window, switchable in the panel |
 
 All figures are account-global — the same panel on every machine synced to the same account shows the same numbers. Data is cached for ~5 minutes (right-click the bar mark, or press `r` in the panel, to force a refresh); a failed API probe serves the last good data instead of flickering.

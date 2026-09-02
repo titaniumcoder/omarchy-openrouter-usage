@@ -189,15 +189,6 @@ Panel {
     return Qt.hsla(hues[index % hues.length] / 360, 0.62, lum > 0.5 ? 0.42 : 0.62, 1)
   }
 
-  function weekOtherCost() {
-    if (!root.keyedBars) return 0
-    var top = 0
-    for (var i = 0; i < dailyKeys.length; i++) top += Number((dailyKeys[i] || {}).cost || 0)
-    var week = 0
-    for (var j = 0; j < days.length; j++) week += Number((days[j] || {}).cost || 0)
-    return Math.max(0, week - top)
-  }
-
   // One day's bar as a list of {index, start, fraction} segments, in rank
   // order, followed by Other. Empty when the chart renders plain.
   function daySegments(day) {
@@ -658,76 +649,6 @@ Panel {
             readonly property real peak: root.weekPeak()
 
             PanelSectionHeader {
-              visible: root.keyedBars
-              width: parent.width
-              text: "USAGE BY DAY · TOP KEYS"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            // Week-wide key ranking: the same three keys the bars color.
-            // Swatches sit at the day bars' left edge and amounts right-align
-            // with the day amounts, so the block reads as one table.
-            Column {
-              visible: root.keyedBars
-              width: parent.width
-              spacing: Style.space(6)
-
-              Repeater {
-                id: keyLegend
-                model: root.dailyKeys.length + (root.weekOtherCost() > 0 ? 1 : 0)
-
-                delegate: Item {
-                  id: legendRow
-                  required property int index
-                  readonly property bool isOther: index >= root.dailyKeys.length
-                  readonly property var entry: isOther ? null : (root.dailyKeys[index] || {})
-                  width: spendSection.width
-                  height: Style.space(14)
-
-                  Rectangle {
-                    id: legendSwatch
-                    x: Style.space(60)
-                    width: Style.space(8)
-                    height: Style.space(8)
-                    radius: 2
-                    anchors.verticalCenter: parent.verticalCenter
-                    color: legendRow.isOther ? root.alpha(root.foreground, 0.55) : root.keyColor(legendRow.index)
-                  }
-
-                  Text {
-                    textFormat: Text.PlainText
-                    anchors.left: legendSwatch.right
-                    anchors.leftMargin: Style.space(6)
-                    anchors.right: legendRow.right
-                    anchors.rightMargin: Style.space(52)
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: legendRow.isOther ? "Other" : String(legendRow.entry.name || "")
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    elide: Text.ElideRight
-                  }
-
-                  Text {
-                    textFormat: Text.PlainText
-                    anchors.right: legendRow.right
-                    width: Style.space(52)
-                    anchors.verticalCenter: parent.verticalCenter
-                    horizontalAlignment: Text.AlignRight
-                    text: legendRow.isOther
-                      ? root.formatCost(root.weekOtherCost())
-                      : root.formatCost(legendRow.entry.cost)
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    font.bold: true
-                  }
-                }
-              }
-            }
-
-            PanelSectionHeader {
               width: parent.width
               text: "USAGE BY DAY"
               foreground: root.foreground
@@ -898,17 +819,6 @@ Panel {
                   text: "KEY BUDGETS"
                   foreground: root.foreground
                   fontFamily: root.fontFamily
-                }
-
-                // What the trailing cadence letter on each row means.
-                Text {
-                  textFormat: Text.PlainText
-                  visible: budgetsSection.visible
-                  width: parent.width
-                  text: "reset: M monthly · W weekly · D daily · N never"
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
                 }
 
                 Repeater {
@@ -1145,26 +1055,9 @@ Panel {
       font.pixelSize: Style.font.caption
       font.bold: true
       horizontalAlignment: Text.AlignRight
-      anchors.right: resetLetterText.left
-      anchors.rightMargin: Style.space(3)
-      anchors.verticalCenter: parent.verticalCenter
-      width: Style.space(96)
-    }
-
-    // Trailing cadence letter: dimmed so it reads as an annotation, with
-    // its meaning spelled out in the row's tooltip.
-    Text {
-      textFormat: Text.PlainText
-      id: resetLetterText
-      visible: text !== ""
-      text: budgetRow.budget ? root.resetLetter(budgetRow.budget.reset) : ""
-      color: root.dim
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.caption
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
-      width: Style.space(10)
-      horizontalAlignment: Text.AlignRight
+      width: Style.space(96)
     }
 
     MouseArea {
