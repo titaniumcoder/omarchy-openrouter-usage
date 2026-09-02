@@ -1,13 +1,13 @@
-# OpenRouter Usage Plus — Omarchy bar widget
+# OpenRouter Usage — Omarchy bar widget
 
 Live OpenRouter credits and spend in the Omarchy (Quattro / 4.x) bar.
 
-![OpenRouter Usage Plus panel](assets/screenshot.png)
+![OpenRouter Usage panel](assets/screenshot.png)
 
 - **Bar** — OpenRouter mark plus remaining prepaid credit
 - **Header** — remaining balance on the right of OpenRouter / prepaid
 - **Shortcuts** — Add Credits, Full Activity, Manage Keys, Browse Models
-- **Spend by day** — last 7 days of rated cost
+- **Spend by day** — last 7 days of rated cost, account-wide; with a management key the bars are colored by the week's top three API keys (rest folds into Other) with a ranked legend
 - **Details** — sticky expand: spend, requests, tokens, cache hit, top models, top apps, top keys
 
 Derived from [ssobhani/omarchy-openrouter-usage](https://github.com/sepehr500/omarchy-openrouter-usage) (MIT). This plugin does **not** replace the stock `omarchy.agents` widget.
@@ -16,13 +16,12 @@ Derived from [ssobhani/omarchy-openrouter-usage](https://github.com/sepehr500/om
 
 - Omarchy 4.x (Quattro)
 - An OpenRouter API key
-- Optional: [management key](https://openrouter.ai/settings/management-keys) for Top Apps and Top Keys
-- Optional: pi/omp OpenRouter sessions for local spend-by-day when analytics is unavailable
+- Optional: [management key](https://openrouter.ai/settings/management-keys) for the account-wide daily chart (key-colored bars), Top Apps and Top Keys
 
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/calmasacow/omarchy-openrouter-usage-plus.git --enable
+omarchy plugin add https://github.com/titaniumcoder/omarchy-openrouter-usage.git --enable
 ```
 
 Then copy the example config and put your real keys in it. The checked-in file is a template only — never commit live keys.
@@ -73,7 +72,7 @@ Right-click the bar mark to refresh.
 ## Remove
 
 ```bash
-omarchy plugin remove calmasacow.openrouter-usage-plus
+omarchy plugin remove titaniumcoder.openrouter-usage
 ```
 
 Optionally delete `~/.config/omarchy/agents/openrouter.json` and `~/.cache/omarchy/agent-usage/openrouter-*.json`. The plugin does not rewrite other config.

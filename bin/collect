@@ -845,43 +845,50 @@ def probe_activity(key: str, period: str) -> dict[str, Any]:
 
 # ------------------------------------------------------------------- daily
 #
-# The Spend by Day chart is account-wide, not per key: OpenRouter exposes
-# daily spend through /activity (day x model x endpoint rows) but that
-# endpoint carries no key dimension, while /analytics/query groups by key
-# but not by day. Account-wide is the same scope as the balance and the
-# Top Keys list, so the chart finally agrees with the rest of the panel.
-# The account feed lags the current day, so today's row comes from the
-# local session scan instead — live, machine-local, clearly the odd one.
+# The Spend by Day chart is account-wide and key-colored. The Analytics API
+# has no time dimension, so a day x key matrix means one /analytics/query
+# per day, each grouped by api_key_id — cheap enough behind the five-minute
+# cache. Windows follow the local calendar day converted to UTC so the bars
+# line up with the panel's date labels; today's partial day is included by
+# the API, so the chart needs no local-scan patch-up. The panel ranks keys
+# across the whole week and colors only the top three; everything else
+# aggregates into Other, and a single-key account renders plain.
 
 
-def probe_daily(key: str) -> dict[str, Any]:
-  try:
-    rows = api_request("/activity", key)
-  except urllib.error.HTTPError as error:
-    if error.code in (401, 403):
-      return {"ok": False, "needsManagementKey": True}
-    return {"ok": False}
-  except Exception:
-    return {"ok": False, "transport": True}
-  if not isinstance(rows, list):
-    return {"ok": False}
-  by_day: dict[str, dict[str, float]] = {}
-  for row in rows[:MAX_TRANSCRIPT_ENTRIES]:
-    if not isinstance(row, dict):
-      continue
-    day = clean_text(row.get("date"), 32)[:10]
-    if len(day) != 10:
-      continue
-    bucket = by_day.setdefault(day, {"cost": 0.0, "tokens": 0.0, "requests": 0.0})
-    # usage is rated spend in dollars; byok_usage_inference is excluded
-    # because BYOK traffic never touches the account's credit balance.
-    bucket["cost"] += money(row.get("usage"))
-    bucket["tokens"] += (
-      number(row.get("prompt_tokens"))
-      + number(row.get("completion_tokens"))
-      + number(row.get("reasoning_tokens"))
-    )
-    bucket["requests"] += number(row.get("requests"))
+def day_window(date: str) -> tuple[str, str]:
+  """UTC ISO bounds of the local calendar day named by `date`."""
+  day = dt.date.fromisoformat(date)
+  start = dt.datetime.combine(day, dt.time.min).astimezone().astimezone(dt.timezone.utc)
+  end = start + dt.timedelta(days=1)
+  now = dt.datetime.now(dt.timezone.utc)
+  if end > now:
+    end = now
+  return start.strftime("%Y-%m-%dT%H:%M:%SZ"), end.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def probe_daily(key: str, dates: list[str]) -> dict[str, Any]:
+  by_day: dict[str, dict[str, dict[str, float]]] = {}
+  for date in dates:
+    start, end = day_window(date)
+    payload = api_request("/analytics/query", key, method="POST", body={
+      "metrics": ["total_usage", "tokens_total", "request_count"],
+      "dimensions": ["api_key_id"],
+      "time_range": {"start": start, "end": end},
+    })
+    breakdown: dict[str, dict[str, float]] = {}
+    for row in analytics_rows(payload):
+      name = clean_text(row.get("api_key_id"), MAX_MODEL_NAME).strip()
+      if name == "" or name.lower() in ("null", "none", "unset", "(unset)"):
+        name = "Unknown"
+      cost = money(row.get("total_usage"))
+      tokens = number(row.get("tokens_total"))
+      if cost <= 0 and tokens <= 0:
+        continue
+      bucket = breakdown.setdefault(name, {"cost": 0.0, "tokens": 0.0, "requests": 0.0})
+      bucket["cost"] += cost
+      bucket["tokens"] += tokens
+      bucket["requests"] += number(row.get("request_count"))
+    by_day[date] = breakdown
   return {"ok": True, "byDay": by_day}
 
 
@@ -896,7 +903,12 @@ def collect_daily(force: bool, stats: dict[str, Any]) -> dict[str, Any]:
   if by_day is None:
     key = management_key()
     if key != "":
-      probe = probe_daily(key)
+      try:
+        probe = probe_daily(key, recent_date_strings())
+      except urllib.error.HTTPError as error:
+        probe = {"ok": False, "needsManagementKey": error.code in (401, 403)}
+      except Exception:
+        probe = {"ok": False, "transport": True}
       if probe.get("ok") and isinstance(probe.get("byDay"), dict):
         write_json(cache_file, {"fetchedAtMs": round(time.time() * 1000), "byDay": probe["byDay"]})
         by_day = probe["byDay"]
@@ -908,34 +920,55 @@ def collect_daily(force: bool, stats: dict[str, Any]) -> dict[str, Any]:
         if isinstance(stale.get("byDay"), dict):
           by_day = stale["byDay"]
   if not isinstance(by_day, dict):
-    return {"scope": "local", "days": []}
+    return {"scope": "local", "keys": [], "days": []}
 
-  # Same seven date strings as the local scan, so the panel's Today logic
-  # keeps working: account numbers win where they exist, today's row falls
-  # back to the local scan because the feed has not closed the day yet.
-  local_days = {day.get("date"): day for day in (stats.get("recentDays") or []) if isinstance(day, dict)}
-  today = local_date_string()
+  dates = recent_date_strings()
+  # Rank keys across the whole week, not per day: the panel colors the top
+  # three consistently through time, so a key that only led on Tuesday
+  # still keeps its hue on a day it barely appears in.
+  week: dict[str, float] = {}
+  for date in dates:
+    for name, bucket in (by_day.get(date) or {}).items():
+      if isinstance(bucket, dict):
+        week[name] = week.get(name, 0.0) + money(bucket.get("cost"))
+  ranked = [name for name, _ in sorted(week.items(), key=lambda item: item[1], reverse=True) if week[name] > 0][:3]
+  top_rank = {name: index for index, name in enumerate(ranked)}
+  # One key carrying the whole week needs no legend and no segmentation.
+  if len(ranked) <= 1:
+    ranked = []
+    top_rank = {}
+
   days: list[dict[str, Any]] = []
-  for date in recent_date_strings():
-    account = by_day.get(date)
-    if isinstance(account, dict):
-      days.append({
-        "date": date,
-        "cost": round(money(account.get("cost")), 6),
-        "messageCount": number(account.get("tokens")),
-        "prompts": number(account.get("requests")),
-      })
-    elif date == today and date in local_days:
-      local = local_days[date]
-      days.append({
-        "date": date,
-        "cost": money(local.get("cost")),
-        "messageCount": number(local.get("messageCount")),
-        "prompts": number(local.get("prompts")),
-      })
-    else:
-      days.append({"date": date, "cost": 0.0, "messageCount": 0, "prompts": 0})
-  return {"scope": "account", "days": days}
+  for date in dates:
+    breakdown = by_day.get(date) if isinstance(by_day.get(date), dict) else None
+    cost = tokens = requests = 0.0
+    keys: list[dict[str, Any]] = []
+    if breakdown:
+      for name, bucket in breakdown.items():
+        if not isinstance(bucket, dict):
+          continue
+        day_cost = money(bucket.get("cost"))
+        day_tokens = number(bucket.get("tokens"))
+        cost += day_cost
+        tokens += day_tokens
+        requests += number(bucket.get("requests"))
+        if name in top_rank:
+          keys.append({"name": name, "cost": round(day_cost, 6), "tokens": day_tokens, "rank": top_rank[name]})
+      keys.sort(key=lambda item: item["rank"])
+    days.append({
+      "date": date,
+      "cost": round(cost, 6),
+      "messageCount": number(tokens),
+      "prompts": number(requests),
+      # Top-three keys only, in rank order; the panel folds the rest into
+      # Other. Empty (single-key account) means a plain monochrome bar.
+      "keys": keys,
+    })
+  return {
+    "scope": "account",
+    "keys": [{"name": name, "cost": round(week[name], 6)} for name in ranked],
+    "days": days,
+  }
 
 
 def collect_activity(period: str, force: bool, limits_only: bool, stats: dict[str, Any]):
@@ -1003,6 +1036,8 @@ def main() -> int:
     "activity": activity,
     "dailyScope": daily["scope"],
   }
+  if daily.get("keys"):
+    record["dailyKeys"] = daily["keys"]
   if daily.get("days"):
     record["dailyDays"] = daily["days"]
   if account.get("balance"):

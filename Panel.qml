@@ -31,6 +31,17 @@ Panel {
     return record ? (record.recentDays || []) : []
   }
   readonly property string dailyScope: record ? String(record.dailyScope || "local") : "local"
+  // Top three keys by cost across the whole week, ranked by the collector.
+  readonly property var dailyKeys: record && Array.isArray(record.dailyKeys) ? record.dailyKeys : []
+  // Bars only break into colored segments when two or more keys were active
+  // during the week; a single-key account keeps the plain bar and no legend.
+  readonly property bool keyedBars: dailyScope === "account" && dailyKeys.length > 1
+  readonly property var keyIndexMap: {
+    var map = {}
+    for (var i = 0; i < dailyKeys.length; i++)
+      map[String((dailyKeys[i] || {}).name || "")] = i
+    return map
+  }
   readonly property var models: modelRows(record)
   readonly property var activity: record ? (record.activity || null) : null
   readonly property var topModels: activityModelRows()
@@ -126,13 +137,64 @@ Panel {
       : dayName(day.date) + " " + (parsed.getMonth() + 1) + "/" + parsed.getDate()
     var text = label + " · " + formatCost(day.cost)
       + " · " + usage.formatTokenCount(Number(day.messageCount || 0)) + " tokens"
-    if (today && record) {
+    if (today && record)
       text += " · " + Number(record.todayPrompts || 0) + " prompts · "
         + Number(record.todaySessions || 0) + " sessions"
-      if (record.dailyScope === "account")
-        text += " · today is machine-local; other days are account-wide"
+    if (root.keyedBars && Array.isArray(day.keys)) {
+      var other = 0
+      for (var i = 0; i < day.keys.length; i++) {
+        var k = day.keys[i] || {}
+        if (root.keyIndexMap[String(k.name || "")] === undefined) {
+          other += Number(k.cost || 0)
+          continue
+        }
+        text += "\n" + String(k.name || "") + " · " + formatCost(k.cost)
+      }
+      if (other > 0) text += "\nOther · " + formatCost(other)
     }
     return text
+  }
+
+  // Three hues chosen to stay distinguishable from each other and from the
+  // theme: lightness follows the foreground so the segments read on both
+  // dark and light popups.
+  function keyColor(index) {
+    var hues = [212, 25, 160]
+    var lum = 0.2126 * foreground.r + 0.7152 * foreground.g + 0.0722 * foreground.b
+    return Qt.hsla(hues[index % hues.length] / 360, 0.62, lum > 0.5 ? 0.42 : 0.62, 1)
+  }
+
+  function weekOtherCost() {
+    if (!root.keyedBars) return 0
+    var top = 0
+    for (var i = 0; i < dailyKeys.length; i++) top += Number((dailyKeys[i] || {}).cost || 0)
+    var week = 0
+    for (var j = 0; j < days.length; j++) week += Number((days[j] || {}).cost || 0)
+    return Math.max(0, week - top)
+  }
+
+  // One day's bar as a list of {index, start, fraction} segments, in rank
+  // order, followed by Other. Empty when the chart renders plain.
+  function daySegments(day) {
+    if (!root.keyedBars || !day || !Array.isArray(day.keys) || day.keys.length === 0) return []
+    var total = Number(day.cost || 0)
+    if (!(total > 0)) return []
+    var top = [], other = 0
+    for (var i = 0; i < day.keys.length; i++) {
+      var k = day.keys[i] || {}
+      var idx = root.keyIndexMap[String(k.name || "")]
+      if (idx !== undefined) top.push({ index: idx, cost: Number(k.cost || 0) })
+      else other += Number(k.cost || 0)
+    }
+    top.sort(function(a, b) { return a.index - b.index })
+    var segs = [], pos = 0
+    for (var j = 0; j < top.length; j++) {
+      segs.push({ index: top[j].index, start: pos / total, fraction: Math.min(1 - pos / total, top[j].cost / total) })
+      pos += top[j].cost
+    }
+    if (other > 0 && pos < total)
+      segs.push({ index: -1, start: pos / total, fraction: (total - pos) / total })
+    return segs
   }
 
   function weekPeak() {
@@ -601,6 +663,54 @@ Panel {
               fontFamily: root.fontFamily
             }
 
+            // Week-wide key ranking: the same three keys the bars color.
+            Column {
+              visible: root.keyedBars
+              width: parent.width
+              spacing: Style.space(6)
+
+              Repeater {
+                id: keyLegend
+                model: root.dailyKeys.length + (root.weekOtherCost() > 0 ? 1 : 0)
+
+                delegate: Row {
+                  required property int index
+                  readonly property bool isOther: index >= root.dailyKeys.length
+                  readonly property var entry: isOther ? null : (root.dailyKeys[index] || {})
+                  spacing: Style.space(6)
+
+                  Rectangle {
+                    width: Style.space(8)
+                    height: Style.space(8)
+                    radius: 2
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: isOther ? root.alpha(root.foreground, 0.55) : root.keyColor(index)
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    width: root.weekOtherCost() > 0 ? spendSection.width - Style.space(96) : spendSection.width - Style.space(60)
+                    text: isOther ? "Other" : (index + 1) + ". " + String(entry.name || "")
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    elide: Text.ElideRight
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    text: isOther ? root.formatCost(root.weekOtherCost()) : root.formatCost(entry.cost)
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+                }
+              }
+            }
+
             Repeater {
               model: root.days
 
@@ -955,16 +1065,45 @@ Panel {
       radius: height / 2
       color: root.track
 
-      Rectangle {
+      Item {
+        id: dayFill
         anchors.left: parent.left
         anchors.verticalCenter: parent.verticalCenter
         height: parent.height
-        radius: parent.radius
         width: parent.width * root.clamp(dayRow.ratio, 0, 1)
-        color: dayRow.today ? root.foreground : root.alpha(root.foreground, 0.55)
 
         Behavior on width {
           NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
+        }
+
+        // Keyed mode: one segment per top-three key in rank order, then
+        // Other. Overlapping by a hair prevents seams between neighbors.
+        Repeater {
+          id: daySegRepeater
+          model: root.daySegments(dayRow.day)
+
+          delegate: Rectangle {
+            required property var modelData
+            required property int index
+            x: dayFill.width * modelData.start
+            width: dayFill.width * modelData.fraction + 1
+            height: parent.height
+            topLeftRadius: index === 0 ? dayTrack.radius : 0
+            bottomLeftRadius: index === 0 ? dayTrack.radius : 0
+            topRightRadius: index === daySegRepeater.count - 1 ? dayTrack.radius : 0
+            bottomRightRadius: index === daySegRepeater.count - 1 ? dayTrack.radius : 0
+            color: modelData.index >= 0
+              ? root.keyColor(modelData.index)
+              : root.alpha(root.foreground, 0.55)
+          }
+        }
+
+        // Plain mode: the original monochrome fill.
+        Rectangle {
+          anchors.fill: parent
+          radius: dayTrack.radius
+          visible: root.daySegments(dayRow.day).length === 0
+          color: dayRow.today ? root.foreground : root.alpha(root.foreground, 0.55)
         }
       }
     }
